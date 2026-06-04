@@ -1,0 +1,6 @@
+{
+  "name": "Mirozo",
+  "description": "Mirozo Android client for AI-assisted scheduling, mobile calendar workflows, and cloud synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
