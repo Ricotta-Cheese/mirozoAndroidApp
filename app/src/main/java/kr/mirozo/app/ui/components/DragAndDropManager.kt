@@ -9,14 +9,12 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.unit.IntOffset
-import kr.mirozo.app.data.local.entity.Schedule
-import kotlin.math.roundToInt
+import kr.mirozo.app.ui.model.CalendarScheduleItem
 
 class DragAndDropState {
     var isDragging by mutableStateOf(false)
         private set
-    var draggedSchedule by mutableStateOf<Schedule?>(null)
+    var draggedSchedule by mutableStateOf<CalendarScheduleItem?>(null)
         private set
     var dragPosition by mutableStateOf(Offset.Zero)
         private set
@@ -26,9 +24,9 @@ class DragAndDropState {
     // Stores the screen bounds of active drop targets mapped by dateString ("yyyy-MM-dd")
     private val targets = mutableMapOf<String, Rect>()
     
-    var onDropOccurred: ((Schedule, String) -> Unit)? = null
+    var onDropOccurred: ((CalendarScheduleItem, String) -> Unit)? = null
 
-    fun startDrag(schedule: Schedule, initialPosition: Offset) {
+    fun startDrag(schedule: CalendarScheduleItem, initialPosition: Offset) {
         draggedSchedule = schedule
         dragPosition = initialPosition
         isDragging = true
@@ -80,7 +78,7 @@ class DragAndDropState {
 val LocalDragAndDropState = staticCompositionLocalOf { DragAndDropState() }
 
 @Composable
-fun rememberDragAndDropState(onDrop: (Schedule, String) -> Unit): DragAndDropState {
+fun rememberDragAndDropState(onDrop: (CalendarScheduleItem, String) -> Unit): DragAndDropState {
     val state = remember { DragAndDropState() }
     LaunchedEffect(onDrop) {
         state.onDropOccurred = onDrop
@@ -89,7 +87,7 @@ fun rememberDragAndDropState(onDrop: (Schedule, String) -> Unit): DragAndDropSta
 }
 
 fun Modifier.dragSource(
-    schedule: Schedule,
+    schedule: CalendarScheduleItem,
     state: DragAndDropState
 ) = pointerInput(schedule, state) {
     detectDragGesturesAfterLongPress(

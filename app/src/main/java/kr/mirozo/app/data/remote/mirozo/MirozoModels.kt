@@ -28,7 +28,7 @@ data class MobileUser(
     val email: String,
     val name: String?,
     val role: String, // "USER" | "ADMIN"
-    @Json(name = "isGuest") val isGuest: Boolean
+    @param:Json(name = "isGuest") val isGuest: Boolean
 )
 
 @JsonClass(generateAdapter = true)

@@ -1,10 +1,16 @@
 package kr.mirozo.app.ui.screens
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -39,9 +46,20 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import kr.mirozo.app.data.local.entity.Schedule
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
+import kotlinx.coroutines.launch
+import kr.mirozo.app.BuildConfig
 import kr.mirozo.app.data.remote.mirozo.*
 import kr.mirozo.app.ui.components.*
+import kr.mirozo.app.ui.model.CalendarScheduleItem
 import kr.mirozo.app.ui.viewmodel.CalendarViewModel
 import kr.mirozo.app.ui.viewmodel.MirozoAuthState
 import kr.mirozo.app.ui.viewmodel.SyncState
@@ -87,6 +105,116 @@ fun getDaysInMonth(year: Int, month: Int): List<CalendarDay> {
     return days
 }
 
+private suspend fun requestGoogleIdToken(
+    context: Context,
+    credentialManager: CredentialManager,
+    viewModel: CalendarViewModel,
+    mode: String
+): Result<String> {
+    val activity = context.findActivity()
+        ?: return Result.failure(IllegalStateException("Google 인증을 시작할 Activity를 찾지 못했습니다."))
+    val serverClientId = BuildConfig.GOOGLE_SERVER_CLIENT_ID.trim()
+    if (serverClientId.isEmpty() || serverClientId == GOOGLE_SERVER_CLIENT_ID_PLACEHOLDER) {
+        return Result.failure(IllegalStateException("GOOGLE_SERVER_CLIENT_ID가 설정되지 않았습니다. .env에 Google Web Client ID를 추가해주세요."))
+    }
+
+    val nonceResult = viewModel.requestGoogleNonce(mode)
+    if (nonceResult.isFailure) {
+        return Result.failure(nonceResult.exceptionOrNull() ?: IllegalStateException("Google nonce 발급에 실패했습니다."))
+    }
+    val nonce = nonceResult.getOrThrow().nonce
+    return requestGoogleIdTokenWithFilter(
+        credentialManager = credentialManager,
+        activity = activity,
+        serverClientId = serverClientId,
+        nonce = nonce,
+        filterByAuthorizedAccounts = true
+    ).recoverCatching { err ->
+        if (err is NoCredentialException) {
+            requestGoogleIdTokenWithFilter(
+                credentialManager = credentialManager,
+                activity = activity,
+                serverClientId = serverClientId,
+                nonce = nonce,
+                filterByAuthorizedAccounts = false
+            ).getOrThrow()
+        } else {
+            throw err
+        }
+    }
+}
+
+private suspend fun requestGoogleIdTokenWithFilter(
+    credentialManager: CredentialManager,
+    activity: Activity,
+    serverClientId: String,
+    nonce: String,
+    filterByAuthorizedAccounts: Boolean
+): Result<String> {
+    return runCatching {
+        val googleIdOption = GetGoogleIdOption.Builder()
+            .setFilterByAuthorizedAccounts(filterByAuthorizedAccounts)
+            .setServerClientId(serverClientId)
+            .setNonce(nonce)
+            .build()
+        val request = GetCredentialRequest.Builder()
+            .addCredentialOption(googleIdOption)
+            .build()
+        val credential = credentialManager.getCredential(activity, request).credential
+        if (credential is CustomCredential &&
+            credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+        ) {
+            GoogleIdTokenCredential.createFrom(credential.data).idToken
+        } else {
+            throw IllegalStateException("지원하지 않는 Google 인증 응답입니다.")
+        }
+    }.recoverCatching { err ->
+        when (err) {
+            is GoogleIdTokenParsingException -> throw IllegalStateException("Google ID 토큰 응답을 읽지 못했습니다.", err)
+            is GetCredentialException -> throw err
+            else -> throw err
+        }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun uploadTimetableImageFromUri(
+    context: Context,
+    uri: Uri,
+    viewModel: CalendarViewModel
+) {
+    runCatching {
+        val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+        if (!mime.startsWith("image/")) {
+            throw IllegalArgumentException("이미지 파일만 업로드할 수 있습니다.")
+        }
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw IllegalArgumentException("선택한 파일을 읽지 못했습니다.")
+        if (bytes.size > MAX_TIMETABLE_IMAGE_BYTES) {
+            throw IllegalArgumentException("시간표 이미지는 10MB 이하만 업로드할 수 있습니다.")
+        }
+        val fileName = context.queryDisplayName(uri) ?: "timetable-image"
+        viewModel.parseTimetableImage(bytes, fileName, mime)
+    }.onFailure { err ->
+        viewModel.reportError(err.message ?: "시간표 이미지를 읽지 못했습니다.")
+    }
+}
+
+private fun Context.queryDisplayName(uri: Uri): String? {
+    return contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (nameIndex >= 0 && cursor.moveToFirst()) cursor.getString(nameIndex) else null
+    }
+}
+
+private const val MAX_TIMETABLE_IMAGE_BYTES = 10 * 1024 * 1024
+private const val GOOGLE_SERVER_CLIENT_ID_PLACEHOLDER = "__SET_ME__"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CalendarHomeScreen(
@@ -94,13 +222,14 @@ fun CalendarHomeScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val credentialManager = remember(context) { CredentialManager.create(context) }
     
     // Core calendar states
     val currentYear by viewModel.currentYear.collectAsState()
     val currentMonth by viewModel.currentMonth.collectAsState()
     val selectedDate by viewModel.selectedDate.collectAsState()
     val syncStatus by viewModel.syncStatus.collectAsState()
-    val googleToken by viewModel.googleToken.collectAsState()
 
     val allSchedulesMap by viewModel.calendarSchedules.collectAsState()
     val selectedSchedules by viewModel.selectedDateSchedules.collectAsState()
@@ -115,12 +244,40 @@ fun CalendarHomeScreen(
 
     // Form modals
     var showAddDialog by remember { mutableStateOf(false) }
-    var scheduleToEdit by remember { mutableStateOf<Schedule?>(null) }
-    var showSyncSetupDialog by remember { mutableStateOf(false) }
+    var scheduleToEdit by remember { mutableStateOf<CalendarScheduleItem?>(null) }
     
     var showAIParserPanel by remember { mutableStateOf(false) }
     var speechInputText by remember { mutableStateOf("") }
     var preselectedDateForAdd by remember { mutableStateOf("") }
+    val googleLinked = (mirozoAuthState as? MirozoAuthState.Authenticated)
+        ?.bootstrap
+        ?.oauth
+        ?.google
+        ?.linkedAccounts
+        ?.isNotEmpty() == true
+
+    fun startGoogleAuth(mode: String) {
+        coroutineScope.launch {
+            requestGoogleIdToken(
+                context = context,
+                credentialManager = credentialManager,
+                viewModel = viewModel,
+                mode = mode
+            ).onSuccess { idToken ->
+                viewModel.submitGoogleIdToken(mode, idToken)
+            }.onFailure { err ->
+                viewModel.reportError(err.message ?: "Google 인증을 완료하지 못했습니다.")
+            }
+        }
+    }
+
+    fun clearGoogleCredentialState() {
+        coroutineScope.launch {
+            runCatching {
+                credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            }
+        }
+    }
 
     // Init custom drag-drop orchestrations
     val dragAndDropState = rememberDragAndDropState { schedule, targetDateString ->
@@ -191,6 +348,7 @@ fun CalendarHomeScreen(
                                 onClick = {
                                     if (useMirozoCloud) {
                                         viewModel.mirozoLogout()
+                                        clearGoogleCredentialState()
                                         Toast.makeText(context, "클라우드가 해제되고 오프라인 모드로 변경되었습니다.", Toast.LENGTH_SHORT).show()
                                     } else {
                                         viewModel.setUseMirozoCloud(true)
@@ -204,11 +362,17 @@ fun CalendarHomeScreen(
                                 )
                             }
 
-                            IconButton(onClick = { showSyncSetupDialog = true }) {
+                            IconButton(
+                                onClick = {
+                                    startGoogleAuth(
+                                        if (mirozoAuthState is MirozoAuthState.Authenticated) "connect" else "login"
+                                    )
+                                }
+                            ) {
                                 Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Sync settings",
-                                    tint = if (googleToken.isNotEmpty()) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline
+                                    imageVector = Icons.Default.AccountCircle,
+                                    contentDescription = "Google account",
+                                    tint = if (googleLinked) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline
                                 )
                             }
                         },
@@ -258,7 +422,10 @@ fun CalendarHomeScreen(
                                 }
                             }
                             is MirozoAuthState.Unauthenticated -> {
-                                MirozoAuthGateScreen(viewModel)
+                                MirozoAuthGateScreen(
+                                    viewModel = viewModel,
+                                    onGoogleLogin = { startGoogleAuth("login") }
+                                )
                             }
                             is MirozoAuthState.OnboardingRequired -> {
                                 MirozoOnboardingQuizScreen(viewModel)
@@ -379,18 +546,6 @@ fun CalendarHomeScreen(
                 }
             }
 
-            // Sync Dialog Setup
-            if (showSyncSetupDialog) {
-                GoogleOAuthSyncDialog(
-                    initialToken = googleToken,
-                    onDismiss = { showSyncSetupDialog = false },
-                    onSave = { token ->
-                        viewModel.saveToken(token)
-                        showSyncSetupDialog = false
-                    }
-                )
-            }
-
             // Add standard Dialog
             if (showAddDialog) {
                 ScheduleFormDialog(
@@ -434,9 +589,9 @@ fun MainCalendarContent(
     currentYear: Int,
     currentMonth: Int,
     selectedDate: String,
-    allSchedulesMap: Map<String, List<Schedule>>,
-    selectedSchedules: List<Schedule>,
-    unscheduledPool: List<Schedule>,
+    allSchedulesMap: Map<String, List<CalendarScheduleItem>>,
+    selectedSchedules: List<CalendarScheduleItem>,
+    unscheduledPool: List<CalendarScheduleItem>,
     dragAndDropState: DragAndDropState,
     showAIParserPanel: Boolean,
     speechInputText: String,
@@ -449,8 +604,8 @@ fun MainCalendarContent(
     onPrevMonth: () -> Unit,
     onNextMonth: () -> Unit,
     onAddQuick: (String) -> Unit,
-    onEditSchedule: (Schedule) -> Unit,
-    onDeleteSchedule: (Schedule) -> Unit
+    onEditSchedule: (CalendarScheduleItem) -> Unit,
+    onDeleteSchedule: (CalendarScheduleItem) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         AnimatedVisibility(
@@ -493,7 +648,7 @@ fun MainCalendarContent(
                             if (nlpLoading) {
                                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                             } else {
-                                Icon(Icons.Default.Send, contentDescription = "Parse")
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Parse")
                             }
                         }
                     }
@@ -560,8 +715,7 @@ fun MainCalendarContent(
                         selectedDate = selectedDate,
                         schedulesMap = allSchedulesMap,
                         onDateSelected = onSelectDate,
-                        dragAndDropState = dragAndDropState,
-                        onQuickAdd = onAddQuick
+                        dragAndDropState = dragAndDropState
                     )
                 }
 
@@ -608,8 +762,7 @@ fun MainCalendarContent(
                     selectedDate = selectedDate,
                     schedulesMap = allSchedulesMap,
                     onDateSelected = onSelectDate,
-                    dragAndDropState = dragAndDropState,
-                    onQuickAdd = onAddQuick
+                    dragAndDropState = dragAndDropState
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -749,10 +902,9 @@ fun CalendarGrid(
     year: Int,
     month: Int,
     selectedDate: String,
-    schedulesMap: Map<String, List<Schedule>>,
+    schedulesMap: Map<String, List<CalendarScheduleItem>>,
     onDateSelected: (String) -> Unit,
-    dragAndDropState: DragAndDropState,
-    onQuickAdd: (String) -> Unit
+    dragAndDropState: DragAndDropState
 ) {
     val days = remember(year, month) { getDaysInMonth(year, month) }
     val daysOfWeek = listOf("일", "월", "화", "수", "목", "금", "토")
@@ -817,14 +969,6 @@ fun CalendarGrid(
                                 )
                                 .clickable {
                                     onDateSelected(day.dateString)
-                                }
-                                .let {
-                                    if (day.isCurrentMonth) {
-                                        it.dragSource(
-                                            Schedule(title = "새 할 일", description = "", dateString = day.dateString),
-                                            dragAndDropState
-                                        )
-                                    } else it
                                 },
                             contentAlignment = Alignment.Center
                         ) {
@@ -883,9 +1027,9 @@ fun CalendarGrid(
 @Composable
 fun DayDetailsSection(
     selectedDate: String,
-    schedules: List<Schedule>,
-    onEdit: (Schedule) -> Unit,
-    onDelete: (Schedule) -> Unit,
+    schedules: List<CalendarScheduleItem>,
+    onEdit: (CalendarScheduleItem) -> Unit,
+    onDelete: (CalendarScheduleItem) -> Unit,
     dragAndDropState: DragAndDropState
 ) {
     Card(
@@ -1040,7 +1184,7 @@ fun DayDetailsSection(
 
 @Composable
 fun UnscheduledPoolSection(
-    items: List<Schedule>,
+    items: List<CalendarScheduleItem>,
     onAddQuickPool: () -> Unit,
     dragAndDropState: DragAndDropState
 ) {
@@ -1149,66 +1293,8 @@ fun UnscheduledPoolSection(
 }
 
 @Composable
-fun GoogleOAuthSyncDialog(
-    initialToken: String,
-    onDismiss: () -> Unit,
-    onSave: (String) -> Unit
-) {
-    var token by remember { mutableStateOf(initialToken) }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(
-                modifier = Modifier
-                    .padding(24.dp)
-                    .fillMaxWidth()
-            ) {
-                Text(
-                    text = "Google Sync Credentials",
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Google Developer Console에서 획득한 OAuth v2 Access Token을 입력하여 양방향 자동 연동을 연출하십시오.",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(bottom = 16.dp)
-                )
-                OutlinedTextField(
-                    value = token,
-                    onValueChange = { token = it },
-                    label = { Text("Google Access Token") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                Spacer(modifier = Modifier.height(24.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("취소")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(onClick = { onSave(token) }) {
-                        Text("연동 저장")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 fun ScheduleFormDialog(
-    schedule: Schedule? = null,
+    schedule: CalendarScheduleItem? = null,
     initialDate: String = "",
     onDismiss: () -> Unit,
     onConfirm: (title: String, desc: String, date: String, start: String, end: String, color: Int, isPool: Boolean) -> Unit
@@ -1358,7 +1444,10 @@ fun ScheduleFormDialog(
 
 // MIROZO GATE SCREEN 1
 @Composable
-fun MirozoAuthGateScreen(viewModel: CalendarViewModel) {
+fun MirozoAuthGateScreen(
+    viewModel: CalendarViewModel,
+    onGoogleLogin: () -> Unit
+) {
     var isLoginTab by remember { mutableStateOf(true) }
     var email by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
@@ -1480,6 +1569,21 @@ fun MirozoAuthGateScreen(viewModel: CalendarViewModel) {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(if (isLoginTab) "스마트 클라우드 로그인" else "계정 만들기")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = onGoogleLogin,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AccountCircle,
+                        contentDescription = "Google",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Google로 계속하기")
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -1694,8 +1798,14 @@ fun MirozoOnboardingQuizScreen(viewModel: CalendarViewModel) {
 // MIROZO GATE SCREEN 3
 @Composable
 fun MirozoTimetableUploadScreen(viewModel: CalendarViewModel) {
+    val context = LocalContext.current
     val draftSchedules by viewModel.timetableDraftSchedules.collectAsState()
     val isLoading by viewModel.timetableIsLoading.collectAsState()
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            uploadTimetableImageFromUri(context, uri, viewModel)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -1721,7 +1831,7 @@ fun MirozoTimetableUploadScreen(viewModel: CalendarViewModel) {
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "학교 시간표 캡처 이미지 혹은 엑셀 시트를 분석하여 매주 고정 수업 일정을 일괄 자동 등록합니다.",
+                    text = "학교 시간표 캡처 이미지를 분석하여 매주 고정 수업 일정을 일괄 자동 등록합니다.",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
@@ -1741,10 +1851,7 @@ fun MirozoTimetableUploadScreen(viewModel: CalendarViewModel) {
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(150.dp)
-                                .clickable {
-                                    val simulatedTimetablePngBytes = "timetable_pixels_sim".toByteArray()
-                                    viewModel.parseTimetableImage(simulatedTimetablePngBytes, "timetable.png", "image/png")
-                                },
+                                .clickable { imagePicker.launch("image/*") },
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
                             shape = RoundedCornerShape(12.dp)
                         ) {
@@ -1755,8 +1862,8 @@ fun MirozoTimetableUploadScreen(viewModel: CalendarViewModel) {
                                 ) {
                                     Icon(Icons.Default.Add, contentDescription = "upload", modifier = Modifier.size(36.dp))
                                     Spacer(modifier = Modifier.height(8.dp))
-                                    Text("시간표 사진 업로드 모의 분석", fontWeight = FontWeight.Bold)
-                                    Text("클릭하여 텍스트 OCR 연동 테스트", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+                                    Text("시간표 사진 선택", fontWeight = FontWeight.Bold)
+                                    Text("PNG, JPEG, WebP, HEIC 이미지를 업로드", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
                                 }
                             }
                         }

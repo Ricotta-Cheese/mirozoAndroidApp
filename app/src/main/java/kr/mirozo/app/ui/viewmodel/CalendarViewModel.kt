@@ -8,6 +8,8 @@ import kr.mirozo.app.data.local.database.AppDatabase
 import kr.mirozo.app.data.local.entity.Schedule
 import kr.mirozo.app.data.repository.ScheduleRepository
 import kr.mirozo.app.data.remote.mirozo.*
+import kr.mirozo.app.ui.model.CalendarScheduleItem
+import kr.mirozo.app.ui.model.toCalendarScheduleItem
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.flow.*
@@ -67,16 +69,16 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
     val syncStatus = MutableStateFlow<SyncState>(SyncState.Idle)
 
     // Task Pool/Unassigned schedules (tasks that have dateString == "unassigned")
-    val allSchedules: StateFlow<List<Schedule>>
+    val allSchedules: StateFlow<List<CalendarScheduleItem>>
 
     // Schedules filtered for the selected month to render markers
-    val calendarSchedules: StateFlow<Map<String, List<Schedule>>>
+    val calendarSchedules: StateFlow<Map<String, List<CalendarScheduleItem>>>
 
     // Schedules for currently selected date
-    val selectedDateSchedules: StateFlow<List<Schedule>>
+    val selectedDateSchedules: StateFlow<List<CalendarScheduleItem>>
 
     // Unscheduled / Idea pool (dateString == "unassigned" or "pool")
-    val taskPool: StateFlow<List<Schedule>>
+    val taskPool: StateFlow<List<CalendarScheduleItem>>
 
     init {
         val database = AppDatabase.getDatabase(application)
@@ -93,7 +95,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             if (useCloud) {
                 mapMirozoSchedulesList(mirozoList, year, month)
             } else {
-                localList
+                localList.map { it.toCalendarScheduleItem() }
             }
         }.stateIn(
             scope = viewModelScope,
@@ -281,6 +283,28 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    suspend fun requestGoogleNonce(mode: String): Result<GoogleNonceResponse> {
+        return authRepo.requestGoogleNonce(mode)
+    }
+
+    fun submitGoogleIdToken(mode: String, idToken: String) {
+        viewModelScope.launch {
+            syncStatus.value = SyncState.Syncing
+            val result = when (mode) {
+                "connect" -> authRepo.googleConnect(idToken)
+                else -> authRepo.googleLogin(idToken)
+            }
+            result.onSuccess {
+                syncStatus.value = SyncState.Success(
+                    if (mode == "connect") "Google 계정이 연결되었습니다." else "Google 로그인에 성공했습니다."
+                )
+                setUseMirozoCloud(true)
+            }.onFailure { err ->
+                syncStatus.value = SyncState.Error("Google 인증 실패: ${err.message}")
+            }
+        }
+    }
+
     fun mirozoLogout() {
         viewModelScope.launch {
             authRepo.logout()
@@ -290,6 +314,10 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             setUseMirozoCloud(false)
             mirozoAuthState.value = MirozoAuthState.Unauthenticated
         }
+    }
+
+    fun reportError(message: String) {
+        syncStatus.value = SyncState.Error(message)
     }
 
     // Onboarding Actions
@@ -564,10 +592,10 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun updateSchedule(schedule: Schedule) {
+    fun updateSchedule(schedule: CalendarScheduleItem) {
         if (useMirozoCloud.value) {
             viewModelScope.launch {
-                val original = mirozoSchedules.value.find { it.id == schedule.id.toInt() }
+                val original = schedule.mirozoSummary ?: mirozoSchedules.value.find { it.id == schedule.id.toInt() }
                 if (original != null) {
                     val isPool = schedule.dateString == "pool"
                     val patch = SchedulePatchPayload(
@@ -589,15 +617,15 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             }
         } else {
             viewModelScope.launch {
-                repository.update(schedule)
+                repository.update(schedule.toLocalSchedule())
             }
         }
     }
 
-    fun deleteSchedule(schedule: Schedule) {
+    fun deleteSchedule(schedule: CalendarScheduleItem) {
         if (useMirozoCloud.value) {
             viewModelScope.launch {
-                val original = mirozoSchedules.value.find { it.id == schedule.id.toInt() }
+                val original = schedule.mirozoSummary ?: mirozoSchedules.value.find { it.id == schedule.id.toInt() }
                 if (original != null) {
                     val patch = SchedulePatchPayload(
                         status = "CANCELED",
@@ -613,9 +641,10 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             }
         } else {
             viewModelScope.launch {
-                repository.delete(schedule)
+                val localSchedule = schedule.toLocalSchedule()
+                repository.delete(localSchedule)
                 val token = googleToken.value
-                val eventId = schedule.googleEventId
+                val eventId = localSchedule.googleEventId
                 if (token.isNotEmpty() && eventId != null) {
                     repository.removeFromGoogle(eventId, token)
                 }
@@ -623,15 +652,17 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun moveSchedule(schedule: Schedule, newDateString: String) {
+    fun moveSchedule(schedule: CalendarScheduleItem, newDateString: String) {
         if (useMirozoCloud.value) {
             viewModelScope.launch {
-                val original = mirozoSchedules.value.find { it.id == schedule.id.toInt() }
+                val original = schedule.mirozoSummary ?: mirozoSchedules.value.find { it.id == schedule.id.toInt() }
                 if (original != null) {
                     val isPool = newDateString == "pool"
                     val patch = SchedulePatchPayload(
-                        startAt = if (isPool) null else "${newDateString}T${original.startTime ?: "09:00"}:00.000Z",
-                        endAt = if (isPool) null else "${newDateString}T${original.endTime ?: "10:00"}:00.000Z",
+                        startAt = if (isPool) null else "${newDateString}T${schedule.startTimeString}:00.000Z",
+                        endAt = if (isPool) null else "${newDateString}T${schedule.endTimeString}:00.000Z",
+                        startTime = schedule.startTimeString,
+                        endTime = schedule.endTimeString,
                         version = original.version
                     )
                     val result = mirozoScheduleRepo.patchSchedule(original.id, patch)
@@ -644,7 +675,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             }
         } else {
             viewModelScope.launch {
-                val updated = schedule.copy(
+                val updated = schedule.toLocalSchedule().copy(
                     dateString = newDateString,
                     isGoogleSynced = false
                 )
@@ -690,8 +721,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
     }
 
     // Maps Mirozo schedule summaries to standard frontend models for visual display
-    private fun mapMirozoSchedulesList(mirozoList: List<ScheduleSummary>, year: Int, month: Int): List<Schedule> {
-        val mappedList = mutableListOf<Schedule>()
+    private fun mapMirozoSchedulesList(mirozoList: List<ScheduleSummary>, year: Int, month: Int): List<CalendarScheduleItem> {
+        val mappedList = mutableListOf<CalendarScheduleItem>()
         // Filter out canceled schedules
         val activeMirozo = mirozoList.filter { it.status != "CANCELED" && it.isActive }
 
@@ -748,7 +779,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         return mappedList
     }
 
-    private fun mapSummaryToUI(mirozo: ScheduleSummary, dateString: String): Schedule {
+    private fun mapSummaryToUI(mirozo: ScheduleSummary, dateString: String): CalendarScheduleItem {
         val colorInt = when (mirozo.type) {
             "FIXED" -> 0xFF4F46E5.toInt() // Indigo
             "TEMPORARY" -> 0xFF10B981.toInt() // Teal
@@ -756,7 +787,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             else -> 0xFF6B7280.toInt() // Slate Grey
         }
         
-        return Schedule(
+        return CalendarScheduleItem(
             id = mirozo.id.toLong(),
             title = mirozo.title,
             description = mirozo.description ?: "",
@@ -765,7 +796,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             endTimeString = mirozo.endTime ?: "10:00",
             color = colorInt,
             isGoogleSynced = mirozo.isMeetAppointment,
-            googleEventId = if (mirozo.preparingCount > 0) "has_preparing" else null
+            googleEventId = if (mirozo.preparingCount > 0) "has_preparing" else null,
+            mirozoSummary = mirozo
         )
     }
 
