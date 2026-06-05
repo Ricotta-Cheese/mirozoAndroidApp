@@ -1,9 +1,12 @@
 package kr.mirozo.app.ui.screens
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -46,6 +49,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
@@ -183,6 +187,17 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
+private fun isNotificationPermissionGranted(context: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+        return true
+    }
+
+    return ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.POST_NOTIFICATIONS
+    ) == PackageManager.PERMISSION_GRANTED
+}
+
 private fun uploadTimetableImageFromUri(
     context: Context,
     uri: Uri,
@@ -234,6 +249,9 @@ fun CalendarHomeScreen(
     val allSchedulesMap by viewModel.calendarSchedules.collectAsState()
     val selectedSchedules by viewModel.selectedDateSchedules.collectAsState()
     val unscheduledPool by viewModel.taskPool.collectAsState()
+    val allScheduleItems = remember(allSchedulesMap, unscheduledPool) {
+        allSchedulesMap.values.flatten() + unscheduledPool
+    }
 
     // Mirozo Cloud states
     val useMirozoCloud by viewModel.useMirozoCloud.collectAsState()
@@ -253,6 +271,19 @@ fun CalendarHomeScreen(
     var showAIParserPanel by remember { mutableStateOf(false) }
     var speechInputText by remember { mutableStateOf("") }
     var preselectedDateForAdd by remember { mutableStateOf("") }
+    var notificationPermissionGranted by remember {
+        mutableStateOf(isNotificationPermissionGranted(context))
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        notificationPermissionGranted = granted
+        Toast.makeText(
+            context,
+            if (granted) "알림 권한이 허용되었습니다." else "알림 권한이 꺼져 있습니다.",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
     val googleLinked = (mirozoAuthState as? MirozoAuthState.Authenticated)
         ?.bootstrap
         ?.oauth
@@ -281,6 +312,16 @@ fun CalendarHomeScreen(
                 credentialManager.clearCredentialState(ClearCredentialStateRequest())
             }
         }
+    }
+
+    fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionGranted = true
+            Toast.makeText(context, "이 기기에서는 별도 알림 권한 요청이 필요하지 않습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     // Init custom drag-drop orchestrations
@@ -595,6 +636,7 @@ fun CalendarHomeScreen(
             if (showAddDialog) {
                 ScheduleFormDialog(
                     initialDate = preselectedDateForAdd,
+                    existingSchedules = allScheduleItems,
                     onDismiss = { showAddDialog = false },
                     onConfirm = { title, desc, date, start, end, colorHex, isPool ->
                         viewModel.addSchedule(title, desc, date, start, end, colorHex, isPool)
@@ -607,6 +649,7 @@ fun CalendarHomeScreen(
             if (scheduleToEdit != null) {
                 ScheduleFormDialog(
                     schedule = scheduleToEdit,
+                    existingSchedules = allScheduleItems,
                     onDismiss = { scheduleToEdit = null },
                     onConfirm = { title, desc, date, start, end, colorHex, isPool ->
                         val targetDate = if (isPool) "pool" else date
@@ -630,7 +673,9 @@ fun CalendarHomeScreen(
                     settings = mirozoSettings,
                     hashtags = mirozoHashtags,
                     useMirozoCloud = useMirozoCloud,
+                    notificationPermissionGranted = notificationPermissionGranted,
                     onDismiss = { showSettingsDialog = false },
+                    onRequestNotificationPermission = { requestNotificationPermission() },
                     onSaveSettings = { payload ->
                         viewModel.updateMirozoSettings(payload)
                         showSettingsDialog = false
@@ -1238,6 +1283,10 @@ fun DayDetailsSection(
     onAction: (CalendarScheduleItem, String) -> Unit,
     dragAndDropState: DragAndDropState
 ) {
+    val isCompactPhone = LocalConfiguration.current.screenWidthDp < 380
+    val trailingButtonSize = if (isCompactPhone) 36.dp else 48.dp
+    val trailingIconSize = if (isCompactPhone) 16.dp else 18.dp
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1368,25 +1417,25 @@ fun DayDetailsSection(
 
                             IconButton(
                                 onClick = { onEdit(schedule) },
-                                modifier = Modifier.size(48.dp)
+                                modifier = Modifier.size(trailingButtonSize)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Edit,
                                     contentDescription = "수정",
                                     tint = MaterialTheme.colorScheme.outline,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(trailingIconSize)
                                 )
                             }
 
                             IconButton(
                                 onClick = { onDelete(schedule) },
-                                modifier = Modifier.size(48.dp)
+                                modifier = Modifier.size(trailingButtonSize)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Delete,
                                     contentDescription = "삭제",
                                     tint = Color(0xFFEF4444),
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(trailingIconSize)
                                 )
                             }
                         }
@@ -1463,41 +1512,45 @@ fun ScheduleStatusActions(
         return
     }
 
+    val isCompactPhone = LocalConfiguration.current.screenWidthDp < 380
+    val actionButtonSize = if (isCompactPhone) 34.dp else 44.dp
+    val actionIconSize = if (isCompactPhone) 16.dp else 17.dp
+
     Row(verticalAlignment = Alignment.CenterVertically) {
         IconButton(
             onClick = { onAction(schedule, "mark_completed") },
             enabled = remote.status != "COMPLETED",
-            modifier = Modifier.size(44.dp)
+            modifier = Modifier.size(actionButtonSize)
         ) {
             Icon(
                 imageVector = Icons.Default.CheckCircle,
                 contentDescription = "완료",
                 tint = if (remote.status == "COMPLETED") MaterialTheme.colorScheme.secondary else Color(0xFF16A34A),
-                modifier = Modifier.size(17.dp)
+                modifier = Modifier.size(actionIconSize)
             )
         }
         IconButton(
             onClick = { onAction(schedule, "mark_missed") },
             enabled = remote.status != "MISSED",
-            modifier = Modifier.size(44.dp)
+            modifier = Modifier.size(actionButtonSize)
         ) {
             Icon(
                 imageVector = Icons.Default.Close,
                 contentDescription = "미완",
                 tint = if (remote.status == "MISSED") MaterialTheme.colorScheme.secondary else Color(0xFFEA580C),
-                modifier = Modifier.size(17.dp)
+                modifier = Modifier.size(actionIconSize)
             )
         }
         if (remote.status == "COMPLETED" || remote.status == "MISSED") {
             IconButton(
                 onClick = { onAction(schedule, "mark_planned") },
-                modifier = Modifier.size(44.dp)
+                modifier = Modifier.size(actionButtonSize)
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
                     contentDescription = "예정으로 되돌리기",
                     tint = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.size(17.dp)
+                    modifier = Modifier.size(actionIconSize)
                 )
             }
         }
@@ -1666,7 +1719,9 @@ fun MirozoSettingsDialog(
     settings: UserScheduleSettings?,
     hashtags: List<UserHashtagSummary>,
     useMirozoCloud: Boolean,
+    notificationPermissionGranted: Boolean,
     onDismiss: () -> Unit,
+    onRequestNotificationPermission: () -> Unit,
     onSaveSettings: (SettingsPatchRequest) -> Unit,
     onSaveHashtags: (List<HashtagInput>) -> Unit
 ) {
@@ -1721,6 +1776,14 @@ fun MirozoSettingsDialog(
                     }
                 }
 
+                Spacer(modifier = Modifier.height(16.dp))
+
+                SectionTitle("알림")
+                NotificationPermissionCard(
+                    granted = notificationPermissionGranted,
+                    useMirozoCloud = useMirozoCloud,
+                    onRequestPermission = onRequestNotificationPermission
+                )
                 Spacer(modifier = Modifier.height(16.dp))
 
                 if (!useMirozoCloud) {
@@ -1914,6 +1977,67 @@ fun MirozoSettingsDialog(
 }
 
 @Composable
+fun NotificationPermissionCard(
+    granted: Boolean,
+    useMirozoCloud: Boolean,
+    onRequestPermission: () -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Surface(
+                modifier = Modifier.size(38.dp),
+                shape = CircleShape,
+                color = if (granted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = if (granted) Icons.Default.CheckCircle else Icons.Default.Settings,
+                        contentDescription = "알림",
+                        tint = if (granted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (granted) "알림 허용됨" else "알림 권한 필요",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (useMirozoCloud) {
+                        "Android 리마인더를 받을 준비를 합니다."
+                    } else {
+                        "클라우드 연결 후 리마인더에 사용합니다."
+                    },
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+
+            OutlinedButton(
+                onClick = onRequestPermission,
+                enabled = !granted
+            ) {
+                Text(if (granted) "완료" else "허용")
+            }
+        }
+    }
+}
+
+@Composable
 fun SectionTitle(text: String) {
     Text(
         text = text,
@@ -1993,6 +2117,7 @@ fun parseHexColor(value: String): Color {
 fun ScheduleFormDialog(
     schedule: CalendarScheduleItem? = null,
     initialDate: String = "",
+    existingSchedules: List<CalendarScheduleItem> = emptyList(),
     onDismiss: () -> Unit,
     onConfirm: (title: String, desc: String, date: String, start: String, end: String, color: Int, isPool: Boolean) -> Unit
 ) {
@@ -2003,6 +2128,25 @@ fun ScheduleFormDialog(
     var end by remember { mutableStateOf(schedule?.endTimeString ?: "10:00") }
     var colorHex by remember { mutableStateOf(schedule?.color ?: 0xFF4F46E5.toInt()) }
     var isPool by remember { mutableStateOf(schedule?.dateString == "pool" || initialDate == "pool") }
+    var allowOverlap by remember { mutableStateOf(false) }
+    val conflicts = remember(existingSchedules, schedule, dateString, start, end, isPool) {
+        findScheduleTimeConflicts(
+            existingSchedules = existingSchedules,
+            currentScheduleId = schedule?.id,
+            dateString = dateString,
+            start = start,
+            end = end,
+            isPool = isPool
+        )
+    }
+    val conflictKey = remember(conflicts, dateString, start, end, isPool) {
+        listOf(dateString, start, end, isPool.toString(), conflicts.joinToString("|") { it.id.toString() })
+            .joinToString(":")
+    }
+
+    LaunchedEffect(conflictKey) {
+        allowOverlap = false
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -2114,6 +2258,69 @@ fun ScheduleFormDialog(
                     }
                 }
 
+                if (conflicts.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.62f)
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = "겹침 경고",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "같은 시간대에 겹치는 일정이 있습니다.",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            conflicts.take(3).forEach { conflict ->
+                                Text(
+                                    text = "${conflict.title} · ${conflict.startTimeString}-${conflict.endTimeString}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (conflicts.size > 3) {
+                                Text(
+                                    text = "외 ${conflicts.size - 3}개",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.padding(top = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = allowOverlap,
+                                    onCheckedChange = { allowOverlap = it }
+                                )
+                                Text(
+                                    text = "겹침을 확인했고 그대로 저장",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Row(
@@ -2129,7 +2336,8 @@ fun ScheduleFormDialog(
                             if (title.isNotEmpty()) {
                                 onConfirm(title, desc, dateString, start, end, colorHex, isPool)
                             }
-                        }
+                        },
+                        enabled = title.isNotBlank() && (conflicts.isEmpty() || allowOverlap)
                     ) {
                         Text("저장")
                     }
@@ -2137,6 +2345,64 @@ fun ScheduleFormDialog(
             }
         }
     }
+}
+
+fun findScheduleTimeConflicts(
+    existingSchedules: List<CalendarScheduleItem>,
+    currentScheduleId: Long?,
+    dateString: String,
+    start: String,
+    end: String,
+    isPool: Boolean
+): List<CalendarScheduleItem> {
+    if (isPool || dateString == "pool") {
+        return emptyList()
+    }
+
+    val startMinutes = parseClockMinutes(start) ?: return emptyList()
+    val endMinutes = parseClockMinutes(end) ?: return emptyList()
+    if (endMinutes <= startMinutes) {
+        return emptyList()
+    }
+
+    return existingSchedules.filter { schedule ->
+        if (schedule.id == currentScheduleId || schedule.dateString != dateString || schedule.dateString == "pool") {
+            return@filter false
+        }
+
+        val candidateStart = parseClockMinutes(schedule.startTimeString) ?: return@filter false
+        val candidateEnd = parseClockMinutes(schedule.endTimeString) ?: return@filter false
+        candidateEnd > candidateStart && intervalsOverlap(
+            startMinutes = startMinutes,
+            endMinutes = endMinutes,
+            otherStartMinutes = candidateStart,
+            otherEndMinutes = candidateEnd
+        )
+    }
+}
+
+fun parseClockMinutes(value: String): Int? {
+    val parts = value.trim().split(":")
+    if (parts.size != 2) {
+        return null
+    }
+
+    val hour = parts[0].toIntOrNull() ?: return null
+    val minute = parts[1].toIntOrNull() ?: return null
+    if (hour !in 0..23 || minute !in 0..59) {
+        return null
+    }
+
+    return hour * 60 + minute
+}
+
+fun intervalsOverlap(
+    startMinutes: Int,
+    endMinutes: Int,
+    otherStartMinutes: Int,
+    otherEndMinutes: Int
+): Boolean {
+    return startMinutes < otherEndMinutes && otherStartMinutes < endMinutes
 }
 
 // MIROZO GATE SCREEN 1
