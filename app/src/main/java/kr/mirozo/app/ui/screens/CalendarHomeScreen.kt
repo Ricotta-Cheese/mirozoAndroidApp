@@ -292,6 +292,7 @@ fun CalendarHomeScreen(
 
     val configuration = LocalConfiguration.current
     val isTablet = configuration.screenWidthDp >= 600
+    val isCompactPhone = configuration.screenWidthDp < 380
 
     // Observes transactional synchronization feedback
     LaunchedEffect(syncStatus) {
@@ -315,24 +316,35 @@ fun CalendarHomeScreen(
                     TopAppBar(
                         title = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.DateRange,
-                                    contentDescription = "App Icon",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(end = 8.dp)
-                                )
+                                if (!isCompactPhone) {
+                                    Icon(
+                                        imageVector = Icons.Default.DateRange,
+                                        contentDescription = "App Icon",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier
+                                            .padding(end = 8.dp)
+                                            .size(24.dp)
+                                    )
+                                }
                                 Column {
                                     Text(
-                                        text = "Mirozo",
+                                        text = "mirozo",
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 18.sp,
-                                        color = MaterialTheme.colorScheme.onBackground
+                                        fontSize = if (isCompactPhone) 16.sp else 18.sp,
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Clip
                                     )
-                                    Text(
-                                        text = if (useMirozoCloud) "Mirozo Cloud Connected" else "LocalStorage Offline Mode",
-                                        fontSize = 11.sp,
-                                        color = if (useMirozoCloud) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-                                    )
+                                    if (!isCompactPhone) {
+                                        Text(
+                                            text = if (useMirozoCloud) "Cloud connected" else "Offline mode",
+                                            fontSize = 11.sp,
+                                            color = if (useMirozoCloud) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
                             }
                         },
@@ -408,13 +420,17 @@ fun CalendarHomeScreen(
                             .testTag("add_schedule_fab")
                             .navigationBarsPadding()
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        if (isCompactPhone) {
                             Icon(Icons.Default.Add, contentDescription = "Add Schedule")
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("새 일정 추가", fontWeight = FontWeight.Bold)
+                        } else {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Add Schedule")
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("새 일정 추가", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -914,6 +930,8 @@ fun ScheduleInsightStrip(
     localScheduleCount: Int,
     useMirozoCloud: Boolean
 ) {
+    val configuration = LocalConfiguration.current
+    val isCompactPhone = configuration.screenWidthDp < 380
     val totalCount = stats?.total ?: localScheduleCount
     val fixedCount = stats?.fixed ?: 0
     val preparingCount = stats?.preparing ?: 0
@@ -927,30 +945,60 @@ fun ScheduleInsightStrip(
         if (useMirozoCloud) "해시태그 없음" else "로컬 모드"
     }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        InsightCard(
-            label = if (useMirozoCloud) "클라우드 일정" else "로컬 일정",
-            value = "${totalCount}개",
-            supporting = "고정 ${fixedCount} · 준비 ${preparingCount}",
-            modifier = Modifier.weight(1f)
-        )
-        InsightCard(
-            label = "하루 공부 상한",
-            value = studyLimitLabel,
-            supporting = settings?.studyTendency ?: "BALANCED",
-            modifier = Modifier.weight(1f)
-        )
-        InsightCard(
-            label = "분류",
-            value = tagLabel,
-            supporting = if (useMirozoCloud) "설정에서 편집" else "클라우드에서 사용",
-            modifier = Modifier.weight(1f)
-        )
+    if (isCompactPhone) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                InsightCard(
+                    label = if (useMirozoCloud) "클라우드 일정" else "로컬 일정",
+                    value = "${totalCount}개",
+                    supporting = "고정 ${fixedCount} · 준비 ${preparingCount}",
+                    modifier = Modifier.weight(1f)
+                )
+                InsightCard(
+                    label = "공부 상한",
+                    value = studyLimitLabel,
+                    supporting = settings?.studyTendency ?: "BALANCED",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            InsightCard(
+                label = "분류",
+                value = tagLabel,
+                supporting = if (useMirozoCloud) "설정에서 편집" else "클라우드에서 사용",
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    } else {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            InsightCard(
+                label = if (useMirozoCloud) "클라우드 일정" else "로컬 일정",
+                value = "${totalCount}개",
+                supporting = "고정 ${fixedCount} · 준비 ${preparingCount}",
+                modifier = Modifier.weight(1f)
+            )
+            InsightCard(
+                label = "공부 상한",
+                value = studyLimitLabel,
+                supporting = settings?.studyTendency ?: "BALANCED",
+                modifier = Modifier.weight(1f)
+            )
+            InsightCard(
+                label = "분류",
+                value = tagLabel,
+                supporting = if (useMirozoCloud) "설정에서 편집" else "클라우드에서 사용",
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
@@ -1237,7 +1285,8 @@ fun DayDetailsSection(
                         Text(
                             text = "오늘 등록된 일정이 없습니다.",
                             fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.outline
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
                             text = "하단 보관함에서 항목을 드래그해 오거나\n새 일정을 추가해 보세요!",
@@ -1257,6 +1306,7 @@ fun DayDetailsSection(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .heightIn(min = 64.dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .dragSource(schedule, dragAndDropState)
@@ -1318,7 +1368,7 @@ fun DayDetailsSection(
 
                             IconButton(
                                 onClick = { onEdit(schedule) },
-                                modifier = Modifier.size(36.dp)
+                                modifier = Modifier.size(48.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Edit,
@@ -1330,7 +1380,7 @@ fun DayDetailsSection(
 
                             IconButton(
                                 onClick = { onDelete(schedule) },
-                                modifier = Modifier.size(36.dp)
+                                modifier = Modifier.size(48.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Delete,
@@ -1417,7 +1467,7 @@ fun ScheduleStatusActions(
         IconButton(
             onClick = { onAction(schedule, "mark_completed") },
             enabled = remote.status != "COMPLETED",
-            modifier = Modifier.size(32.dp)
+            modifier = Modifier.size(44.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.CheckCircle,
@@ -1429,7 +1479,7 @@ fun ScheduleStatusActions(
         IconButton(
             onClick = { onAction(schedule, "mark_missed") },
             enabled = remote.status != "MISSED",
-            modifier = Modifier.size(32.dp)
+            modifier = Modifier.size(44.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.Close,
@@ -1441,7 +1491,7 @@ fun ScheduleStatusActions(
         if (remote.status == "COMPLETED" || remote.status == "MISSED") {
             IconButton(
                 onClick = { onAction(schedule, "mark_planned") },
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(44.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
@@ -1540,11 +1590,27 @@ fun UnscheduledPoolSection(
                         .fillMaxWidth(),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "보관함이 비어있습니다.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Empty pool",
+                            tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.58f),
+                            modifier = Modifier.size(30.dp)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "보관함이 비어있습니다.",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "날짜가 없는 준비 일정을 여기에 모아둘 수 있어요.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.outline,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             } else {
                 LazyColumn(
@@ -1555,6 +1621,7 @@ fun UnscheduledPoolSection(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .heightIn(min = 56.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .dragSource(schedule, dragAndDropState)
