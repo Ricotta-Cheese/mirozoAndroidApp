@@ -798,8 +798,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
     // Maps Mirozo schedule summaries to standard frontend models for visual display
     private fun mapMirozoSchedulesList(mirozoList: List<ScheduleSummary>, year: Int, month: Int): List<CalendarScheduleItem> {
         val mappedList = mutableListOf<CalendarScheduleItem>()
-        // Filter out canceled schedules
-        val activeMirozo = mirozoList.filter { it.status != "CANCELED" && it.isActive }
+        // Keep canceled schedules available so the UI can hide them by default and reveal them when filtered.
+        val activeMirozo = mirozoList.filter { it.isActive || it.status == "CANCELED" }
 
         activeMirozo.forEach { mirozo ->
             when (mirozo.type) {

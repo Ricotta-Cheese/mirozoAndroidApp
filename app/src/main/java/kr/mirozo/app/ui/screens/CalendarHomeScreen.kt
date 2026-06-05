@@ -17,6 +17,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -71,6 +72,139 @@ import java.util.Calendar
 import kotlin.math.roundToInt
 
 data class CalendarDay(val dateString: String, val dayNumber: Int, val isCurrentMonth: Boolean)
+
+private enum class ScheduleDiscoverySort(val label: String) {
+    TIME_ASC("시간 빠른순"),
+    TIME_DESC("시간 늦은순"),
+    TITLE_ASC("가나다순"),
+    TYPE_STATUS("유형/상태순")
+}
+
+private data class ScheduleDiscoveryFilters(
+    val query: String = "",
+    val types: Set<String> = emptySet(),
+    val statuses: Set<String> = emptySet(),
+    val hashtags: Set<String> = emptySet(),
+    val dateFrom: String = "",
+    val dateTo: String = "",
+    val sort: ScheduleDiscoverySort = ScheduleDiscoverySort.TIME_ASC
+) {
+    val active: Boolean
+        get() = query.isNotBlank() ||
+            types.isNotEmpty() ||
+            statuses.isNotEmpty() ||
+            hashtags.isNotEmpty() ||
+            dateFrom.isNotBlank() ||
+            dateTo.isNotBlank() ||
+            sort != ScheduleDiscoverySort.TIME_ASC
+}
+
+private val discoveryTypeOptions = listOf("FIXED", "TEMPORARY", "PREPARING")
+private val discoveryStatusOptions = listOf("PLANNED", "COMPLETED", "MISSED", "RESCHEDULED", "CANCELED")
+
+private fun Set<String>.toggled(value: String): Set<String> =
+    if (contains(value)) this - value else this + value
+
+private fun normalizeDiscoveryText(value: String?): String =
+    value.orEmpty().trim().lowercase().replace(Regex("\\s+"), " ")
+
+private fun compactDiscoveryText(value: String): String =
+    value.filter { it.isLetterOrDigit() }.lowercase()
+
+private fun CalendarScheduleItem.discoveryType(): String =
+    mirozoSummary?.type ?: "TEMPORARY"
+
+private fun CalendarScheduleItem.discoveryStatus(): String =
+    mirozoSummary?.status ?: "PLANNED"
+
+private fun CalendarScheduleItem.discoveryDateKey(): String =
+    if (dateString != "pool") dateString else mirozoSummary?.startAt?.take(10).orEmpty()
+
+private fun CalendarScheduleItem.discoveryHashtags(): Set<String> =
+    Regex("""#([^\s#]+)""")
+        .findAll(description)
+        .map { it.groupValues[1].lowercase() }
+        .toSet()
+
+private fun CalendarScheduleItem.matchesDiscovery(filters: ScheduleDiscoveryFilters): Boolean {
+    val status = discoveryStatus()
+    if (status == "CANCELED" && "CANCELED" !in filters.statuses) {
+        return false
+    }
+
+    val type = discoveryType()
+    if (filters.types.isNotEmpty() && type !in filters.types) {
+        return false
+    }
+
+    if (filters.statuses.isNotEmpty() && status !in filters.statuses) {
+        return false
+    }
+
+    if (filters.hashtags.isNotEmpty()) {
+        val itemHashtags = discoveryHashtags()
+        if (filters.hashtags.none { it.lowercase() in itemHashtags }) {
+            return false
+        }
+    }
+
+    val dateKey = discoveryDateKey()
+    if (filters.dateFrom.isNotBlank() && (dateKey.isBlank() || dateKey < filters.dateFrom)) {
+        return false
+    }
+    if (filters.dateTo.isNotBlank() && (dateKey.isBlank() || dateKey > filters.dateTo)) {
+        return false
+    }
+
+    val query = normalizeDiscoveryText(filters.query)
+    if (query.isBlank()) {
+        return true
+    }
+
+    val remote = mirozoSummary
+    val haystack = listOfNotNull(
+        title,
+        description,
+        dateString,
+        startTimeString,
+        endTimeString,
+        remote?.location,
+        remote?.people,
+        remote?.parentSchedule?.title,
+        remote?.targetSchedule?.title,
+        scheduleTypeLabel(type),
+        scheduleStatusLabel(status)
+    ).joinToString(" ") { normalizeDiscoveryText(it) }
+    val compactHaystack = compactDiscoveryText(haystack)
+    val compactQuery = compactDiscoveryText(query)
+    val tokens = query.split(" ").filter { it.isNotBlank() }
+
+    return haystack.contains(query) ||
+        (compactQuery.isNotBlank() && compactHaystack.contains(compactQuery)) ||
+        tokens.all { token ->
+            haystack.contains(token) || compactHaystack.contains(compactDiscoveryText(token))
+        }
+}
+
+private fun sortDiscoverySchedules(
+    schedules: List<CalendarScheduleItem>,
+    sort: ScheduleDiscoverySort
+): List<CalendarScheduleItem> = when (sort) {
+    ScheduleDiscoverySort.TIME_ASC -> schedules.sortedWith(
+        compareBy<CalendarScheduleItem>({ it.discoveryDateKey().ifBlank { "9999-99-99" } }, { it.startTimeString }, { it.title.lowercase() })
+    )
+    ScheduleDiscoverySort.TIME_DESC -> schedules.sortedWith(
+        compareByDescending<CalendarScheduleItem> { it.discoveryDateKey().ifBlank { "0000-00-00" } }
+            .thenByDescending { it.startTimeString }
+            .thenBy { it.title.lowercase() }
+    )
+    ScheduleDiscoverySort.TITLE_ASC -> schedules.sortedWith(
+        compareBy<CalendarScheduleItem>({ it.title.lowercase() }, { it.discoveryDateKey() }, { it.startTimeString })
+    )
+    ScheduleDiscoverySort.TYPE_STATUS -> schedules.sortedWith(
+        compareBy<CalendarScheduleItem>({ scheduleTypeLabel(it.discoveryType()) }, { scheduleStatusLabel(it.discoveryStatus()) }, { it.discoveryDateKey() }, { it.startTimeString })
+    )
+}
 
 fun getDaysInMonth(year: Int, month: Int): List<CalendarDay> {
     val days = mutableListOf<CalendarDay>()
@@ -687,6 +821,7 @@ fun CalendarHomeScreen(
                 )
             }
         }
+
     }
 }
 
@@ -719,6 +854,35 @@ fun MainCalendarContent(
     onDeleteSchedule: (CalendarScheduleItem) -> Unit,
     onScheduleAction: (CalendarScheduleItem, String) -> Unit
 ) {
+    var discoveryFilters by remember { mutableStateOf(ScheduleDiscoveryFilters()) }
+    var discoveryDialogOpen by remember { mutableStateOf(false) }
+    val allDiscoveryItems = remember(allSchedulesMap, unscheduledPool) {
+        allSchedulesMap.values.flatten() + unscheduledPool
+    }
+    val filteredSchedulesMap = remember(allSchedulesMap, discoveryFilters) {
+        allSchedulesMap.mapValues { (_, schedules) ->
+            sortDiscoverySchedules(
+                schedules.filter { it.matchesDiscovery(discoveryFilters) },
+                discoveryFilters.sort
+            )
+        }
+    }
+    val filteredSelectedSchedules = remember(selectedSchedules, discoveryFilters) {
+        sortDiscoverySchedules(
+            selectedSchedules.filter { it.matchesDiscovery(discoveryFilters) },
+            discoveryFilters.sort
+        )
+    }
+    val filteredUnscheduledPool = remember(unscheduledPool, discoveryFilters) {
+        sortDiscoverySchedules(
+            unscheduledPool.filter { it.matchesDiscovery(discoveryFilters) },
+            discoveryFilters.sort
+        )
+    }
+    val filteredDiscoveryCount = remember(allDiscoveryItems, discoveryFilters) {
+        allDiscoveryItems.count { it.matchesDiscovery(discoveryFilters) }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         AnimatedVisibility(
             visible = showAIParserPanel,
@@ -808,6 +972,14 @@ fun MainCalendarContent(
             useMirozoCloud = useMirozoCloud
         )
 
+        ScheduleDiscoveryControlBar(
+            filters = discoveryFilters,
+            filteredCount = filteredDiscoveryCount,
+            totalCount = allDiscoveryItems.size,
+            onOpen = { discoveryDialogOpen = true },
+            onReset = { discoveryFilters = ScheduleDiscoveryFilters() }
+        )
+
         if (isTablet) {
             Row(
                 modifier = Modifier
@@ -833,7 +1005,7 @@ fun MainCalendarContent(
                         year = currentYear,
                         month = currentMonth,
                         selectedDate = selectedDate,
-                        schedulesMap = allSchedulesMap,
+                        schedulesMap = filteredSchedulesMap,
                         onDateSelected = onSelectDate,
                         dragAndDropState = dragAndDropState
                     )
@@ -846,7 +1018,8 @@ fun MainCalendarContent(
                 ) {
                     DayDetailsSection(
                         selectedDate = selectedDate,
-                        schedules = selectedSchedules,
+                        schedules = filteredSelectedSchedules,
+                        totalScheduleCount = selectedSchedules.size,
                         useMirozoCloud = useMirozoCloud,
                         onEdit = onEditSchedule,
                         onDelete = onDeleteSchedule,
@@ -857,7 +1030,8 @@ fun MainCalendarContent(
                     Spacer(modifier = Modifier.height(16.dp))
 
                     UnscheduledPoolSection(
-                        items = unscheduledPool,
+                        items = filteredUnscheduledPool,
+                        totalItemCount = unscheduledPool.size,
                         onAddQuickPool = { onAddQuick("pool") },
                         dragAndDropState = dragAndDropState
                     )
@@ -882,7 +1056,7 @@ fun MainCalendarContent(
                     year = currentYear,
                     month = currentMonth,
                     selectedDate = selectedDate,
-                    schedulesMap = allSchedulesMap,
+                    schedulesMap = filteredSchedulesMap,
                     onDateSelected = onSelectDate,
                     dragAndDropState = dragAndDropState
                 )
@@ -921,7 +1095,8 @@ fun MainCalendarContent(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("미지정 보관함", fontWeight = FontWeight.SemiBold)
-                            if (unscheduledPool.isNotEmpty()) {
+                            val poolBadgeCount = if (discoveryFilters.active) filteredUnscheduledPool.size else unscheduledPool.size
+                            if (poolBadgeCount > 0) {
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Box(
                                     modifier = Modifier
@@ -930,7 +1105,7 @@ fun MainCalendarContent(
                                         .wrapContentSize(Alignment.Center)
                                 ) {
                                     Text(
-                                        text = "${unscheduledPool.size}",
+                                        text = "$poolBadgeCount",
                                         color = Color.White,
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold
@@ -947,7 +1122,8 @@ fun MainCalendarContent(
                     if (selectDetailTab) {
                         DayDetailsSection(
                             selectedDate = selectedDate,
-                            schedules = selectedSchedules,
+                            schedules = filteredSelectedSchedules,
+                            totalScheduleCount = selectedSchedules.size,
                             useMirozoCloud = useMirozoCloud,
                             onEdit = onEditSchedule,
                             onDelete = onDeleteSchedule,
@@ -956,7 +1132,8 @@ fun MainCalendarContent(
                         )
                     } else {
                         UnscheduledPoolSection(
-                            items = unscheduledPool,
+                            items = filteredUnscheduledPool,
+                            totalItemCount = unscheduledPool.size,
                             onAddQuickPool = { onAddQuick("pool") },
                             dragAndDropState = dragAndDropState
                         )
@@ -964,6 +1141,315 @@ fun MainCalendarContent(
                 }
             }
         }
+        if (discoveryDialogOpen) {
+            ScheduleDiscoveryDialog(
+                filters = discoveryFilters,
+                hashtags = hashtags.map { it.name },
+                filteredCount = filteredDiscoveryCount,
+                totalCount = allDiscoveryItems.size,
+                onFiltersChange = { discoveryFilters = it },
+                onDismiss = { discoveryDialogOpen = false },
+                onReset = { discoveryFilters = ScheduleDiscoveryFilters() }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScheduleDiscoveryControlBar(
+    filters: ScheduleDiscoveryFilters,
+    filteredCount: Int,
+    totalCount: Int,
+    onOpen: () -> Unit,
+    onReset: () -> Unit
+) {
+    val activeLabel = if (filters.active) {
+        "${filteredCount}/${totalCount}개 표시"
+    } else {
+        "기본: 취소 일정 숨김"
+    }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = if (filters.active) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.54f)
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
+        tonalElevation = if (filters.active) 2.dp else 0.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Search,
+                contentDescription = null,
+                tint = if (filters.active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = filters.query.ifBlank { "검색과 필터" },
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = activeLabel,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (filters.active) {
+                TextButton(
+                    onClick = onReset,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
+                    Text("초기화", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Button(
+                onClick = onOpen,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text("열기", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScheduleDiscoveryDialog(
+    filters: ScheduleDiscoveryFilters,
+    hashtags: List<String>,
+    filteredCount: Int,
+    totalCount: Int,
+    onFiltersChange: (ScheduleDiscoveryFilters) -> Unit,
+    onDismiss: () -> Unit,
+    onReset: () -> Unit
+) {
+    val isCompactPhone = LocalConfiguration.current.screenWidthDp < 380
+    val uniqueHashtags = remember(hashtags) {
+        hashtags.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 620.dp),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "검색과 필터",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (filters.active) "${filteredCount}/${totalCount}개 일정 표시" else "취소된 일정은 기본으로 숨겨집니다.",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "닫기")
+                    }
+                }
+
+                OutlinedTextField(
+                    value = filters.query,
+                    onValueChange = { onFiltersChange(filters.copy(query = it)) },
+                    label = { Text("제목, 메모, 장소, #태그") },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = null)
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                DiscoveryFilterGroup(title = "일정 유형") {
+                    discoveryTypeOptions.forEach { type ->
+                        FilterChip(
+                            selected = type in filters.types,
+                            onClick = {
+                                onFiltersChange(filters.copy(types = filters.types.toggled(type)))
+                            },
+                            label = { Text(scheduleTypeLabel(type)) }
+                        )
+                    }
+                }
+
+                DiscoveryFilterGroup(title = "상태") {
+                    discoveryStatusOptions.forEach { status ->
+                        FilterChip(
+                            selected = status in filters.statuses,
+                            onClick = {
+                                onFiltersChange(filters.copy(statuses = filters.statuses.toggled(status)))
+                            },
+                            label = { Text(scheduleStatusLabel(status)) }
+                        )
+                    }
+                }
+
+                if (uniqueHashtags.isNotEmpty()) {
+                    DiscoveryFilterGroup(title = "해시태그") {
+                        uniqueHashtags.forEach { hashtag ->
+                            FilterChip(
+                                selected = hashtag in filters.hashtags,
+                                onClick = {
+                                    onFiltersChange(filters.copy(hashtags = filters.hashtags.toggled(hashtag)))
+                                },
+                                label = { Text("#$hashtag") }
+                            )
+                        }
+                    }
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "날짜 범위",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                    if (isCompactPhone) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            DiscoveryDateField(
+                                label = "시작일",
+                                value = filters.dateFrom,
+                                onValueChange = { onFiltersChange(filters.copy(dateFrom = it)) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            DiscoveryDateField(
+                                label = "종료일",
+                                value = filters.dateTo,
+                                onValueChange = { onFiltersChange(filters.copy(dateTo = it)) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            DiscoveryDateField(
+                                label = "시작일",
+                                value = filters.dateFrom,
+                                onValueChange = { onFiltersChange(filters.copy(dateFrom = it)) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            DiscoveryDateField(
+                                label = "종료일",
+                                value = filters.dateTo,
+                                onValueChange = { onFiltersChange(filters.copy(dateTo = it)) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                DiscoveryFilterGroup(title = "정렬") {
+                    ScheduleDiscoverySort.values().forEach { sort ->
+                        FilterChip(
+                            selected = filters.sort == sort,
+                            onClick = { onFiltersChange(filters.copy(sort = sort)) },
+                            label = { Text(sort.label) }
+                        )
+                    }
+                }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                ) {
+                    OutlinedButton(
+                        onClick = onReset,
+                        enabled = filters.active
+                    ) {
+                        Text("초기화")
+                    }
+                    Button(onClick = onDismiss) {
+                        Text("적용")
+                    }
+                }
+            }
+        }
+
+    }
+}
+
+@Composable
+private fun DiscoveryDateField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        placeholder = { Text("YYYY-MM-DD") },
+        singleLine = true,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun DiscoveryFilterGroup(
+    title: String,
+    content: @Composable RowScope.() -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = title,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.outline
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            content = content
+        )
     }
 }
 
@@ -1277,6 +1763,7 @@ fun CalendarGrid(
 fun DayDetailsSection(
     selectedDate: String,
     schedules: List<CalendarScheduleItem>,
+    totalScheduleCount: Int = schedules.size,
     useMirozoCloud: Boolean,
     onEdit: (CalendarScheduleItem) -> Unit,
     onDelete: (CalendarScheduleItem) -> Unit,
@@ -1302,7 +1789,11 @@ fun DayDetailsSection(
                 .fillMaxSize()
         ) {
             Text(
-                text = "$selectedDate 일정 (${schedules.size})",
+                text = if (schedules.size != totalScheduleCount) {
+                    "$selectedDate 일정 (${schedules.size}/${totalScheduleCount})"
+                } else {
+                    "$selectedDate 일정 (${schedules.size})"
+                },
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
@@ -1325,20 +1816,24 @@ fun DayDetailsSection(
                         verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = "Empty",
+                            imageVector = if (totalScheduleCount > 0) Icons.Default.Search else Icons.Default.Info,
+                            contentDescription = if (totalScheduleCount > 0) "No matching schedules" else "Empty",
                             tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
                             modifier = Modifier.size(36.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "오늘 등록된 일정이 없습니다.",
+                            text = if (totalScheduleCount > 0) "조건에 맞는 일정이 없습니다." else "오늘 등록된 일정이 없습니다.",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = "하단 보관함에서 항목을 드래그해 오거나\n새 일정을 추가해 보세요!",
+                            text = if (totalScheduleCount > 0) {
+                                "검색어나 필터를 초기화해 보세요."
+                            } else {
+                                "하단 보관함에서 항목을 드래그해 오거나\n새 일정을 추가해 보세요!"
+                            },
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.8f),
                             textAlign = TextAlign.Center,
@@ -1590,6 +2085,7 @@ fun scheduleStatusColor(status: String): Color = when (status) {
 @Composable
 fun UnscheduledPoolSection(
     items: List<CalendarScheduleItem>,
+    totalItemCount: Int = items.size,
     onAddQuickPool: () -> Unit,
     dragAndDropState: DragAndDropState
 ) {
@@ -1613,7 +2109,11 @@ fun UnscheduledPoolSection(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "일정 미지정 보관함",
+                    text = if (items.size != totalItemCount) {
+                        "일정 미지정 보관함 (${items.size}/${totalItemCount})"
+                    } else {
+                        "일정 미지정 보관함"
+                    },
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
@@ -1645,20 +2145,24 @@ fun UnscheduledPoolSection(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = "Empty pool",
+                            imageVector = if (totalItemCount > 0) Icons.Default.Search else Icons.Default.Info,
+                            contentDescription = if (totalItemCount > 0) "No matching pool items" else "Empty pool",
                             tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.58f),
                             modifier = Modifier.size(30.dp)
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "보관함이 비어있습니다.",
+                            text = if (totalItemCount > 0) "조건에 맞는 보관함 항목이 없습니다." else "보관함이 비어있습니다.",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = "날짜가 없는 준비 일정을 여기에 모아둘 수 있어요.",
+                            text = if (totalItemCount > 0) {
+                                "검색어나 필터를 초기화해 보세요."
+                            } else {
+                                "날짜가 없는 준비 일정을 여기에 모아둘 수 있어요."
+                            },
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.outline,
                             textAlign = TextAlign.Center
@@ -1973,6 +2477,7 @@ fun MirozoSettingsDialog(
                 }
             }
         }
+
     }
 }
 
@@ -2367,6 +2872,9 @@ fun findScheduleTimeConflicts(
 
     return existingSchedules.filter { schedule ->
         if (schedule.id == currentScheduleId || schedule.dateString != dateString || schedule.dateString == "pool") {
+            return@filter false
+        }
+        if (schedule.mirozoSummary?.status == "CANCELED") {
             return@filter false
         }
 
