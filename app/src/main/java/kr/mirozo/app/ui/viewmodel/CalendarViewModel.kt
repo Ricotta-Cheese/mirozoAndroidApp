@@ -547,6 +547,81 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun applyMirozoScheduleAction(schedule: CalendarScheduleItem, action: String) {
+        if (!useMirozoCloud.value) {
+            syncStatus.value = SyncState.Error("클라우드 일정에서만 상태를 변경할 수 있습니다.")
+            return
+        }
+
+        viewModelScope.launch {
+            val original = schedule.mirozoSummary ?: mirozoSchedules.value.find { it.id == schedule.id.toInt() }
+            if (original == null) {
+                syncStatus.value = SyncState.Error("상태를 변경할 클라우드 일정을 찾지 못했습니다.")
+                return@launch
+            }
+
+            val payload = PatchActionPayload(
+                version = original.version,
+                action = action,
+                importance = 2,
+                difficulty = 2,
+                failureReason = if (action == "mark_missed") "PROCRASTINATED" else null
+            )
+            syncStatus.value = SyncState.Syncing
+            val result = mirozoScheduleRepo.patchAction(original.id, payload)
+            result.onSuccess {
+                refreshMirozoSchedules()
+                val message = when (action) {
+                    "mark_completed" -> "일정을 완료로 기록했습니다."
+                    "mark_missed" -> "미완료로 기록하고 복구 계산에 반영했습니다."
+                    "mark_planned" -> "일정을 다시 예정 상태로 돌렸습니다."
+                    else -> "일정 상태를 업데이트했습니다."
+                }
+                syncStatus.value = SyncState.Success(message)
+            }.onFailure { err ->
+                syncStatus.value = SyncState.Error("상태 변경 실패: ${err.message}")
+            }
+        }
+    }
+
+    fun updateMirozoSettings(payload: SettingsPatchRequest) {
+        if (!useMirozoCloud.value) {
+            syncStatus.value = SyncState.Error("클라우드 설정을 켠 뒤 저장할 수 있습니다.")
+            return
+        }
+
+        viewModelScope.launch {
+            syncStatus.value = SyncState.Syncing
+            val result = settingsRepo.patchSettings(payload)
+            result.onSuccess { response ->
+                mirozoSettings.value = response.settings
+                mirozoHashtags.value = response.hashtags
+                syncStatus.value = SyncState.Success("설정을 저장했습니다.")
+            }.onFailure { err ->
+                syncStatus.value = SyncState.Error("설정 저장 실패: ${err.message}")
+            }
+        }
+    }
+
+    fun updateMirozoHashtags(hashtags: List<HashtagInput>) {
+        if (!useMirozoCloud.value) {
+            syncStatus.value = SyncState.Error("클라우드 설정을 켠 뒤 해시태그를 저장할 수 있습니다.")
+            return
+        }
+
+        viewModelScope.launch {
+            syncStatus.value = SyncState.Syncing
+            val result = settingsRepo.patchHashtags(hashtags)
+            result.onSuccess { response ->
+                mirozoSettings.value = response.settings
+                mirozoHashtags.value = response.hashtags
+                syncStatus.value = SyncState.Success("해시태그 색상을 저장했습니다.")
+            }.onFailure { err ->
+                syncStatus.value = SyncState.Error("해시태그 저장 실패: ${err.message}")
+            }
+        }
+    }
+
     // CRUD database actions (mapped for both Offline SQLite and Mirozo Cloud!)
     fun addSchedule(
         title: String,

@@ -238,6 +238,9 @@ fun CalendarHomeScreen(
     // Mirozo Cloud states
     val useMirozoCloud by viewModel.useMirozoCloud.collectAsState()
     val mirozoAuthState by viewModel.mirozoAuthState.collectAsState()
+    val mirozoStats by viewModel.mirozoStats.collectAsState()
+    val mirozoSettings by viewModel.mirozoSettings.collectAsState()
+    val mirozoHashtags by viewModel.mirozoHashtags.collectAsState()
     val nlpReply by viewModel.nlpReply.collectAsState()
     val nlpParsedIntent by viewModel.nlpParsedIntent.collectAsState()
     val nlpLoading by viewModel.nlpLoading.collectAsState()
@@ -245,6 +248,7 @@ fun CalendarHomeScreen(
     // Form modals
     var showAddDialog by remember { mutableStateOf(false) }
     var scheduleToEdit by remember { mutableStateOf<CalendarScheduleItem?>(null) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
     
     var showAIParserPanel by remember { mutableStateOf(false) }
     var speechInputText by remember { mutableStateOf("") }
@@ -341,6 +345,17 @@ fun CalendarHomeScreen(
                                     imageVector = Icons.Default.Face,
                                     contentDescription = "Mirozo AI",
                                     tint = if (showAIParserPanel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { showSettingsDialog = true },
+                                modifier = Modifier.testTag("settings_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "설정",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
 
@@ -442,6 +457,10 @@ fun CalendarHomeScreen(
                                     allSchedulesMap = allSchedulesMap,
                                     selectedSchedules = selectedSchedules,
                                     unscheduledPool = unscheduledPool,
+                                    stats = mirozoStats,
+                                    settings = mirozoSettings,
+                                    hashtags = mirozoHashtags,
+                                    useMirozoCloud = useMirozoCloud,
                                     dragAndDropState = dragAndDropState,
                                     showAIParserPanel = showAIParserPanel,
                                     speechInputText = speechInputText,
@@ -458,7 +477,10 @@ fun CalendarHomeScreen(
                                         showAddDialog = true
                                     },
                                     onEditSchedule = { scheduleToEdit = it },
-                                    onDeleteSchedule = { viewModel.deleteSchedule(it) }
+                                    onDeleteSchedule = { viewModel.deleteSchedule(it) },
+                                    onScheduleAction = { schedule, action ->
+                                        viewModel.applyMirozoScheduleAction(schedule, action)
+                                    }
                                 )
                             }
                         }
@@ -471,6 +493,10 @@ fun CalendarHomeScreen(
                             allSchedulesMap = allSchedulesMap,
                             selectedSchedules = selectedSchedules,
                             unscheduledPool = unscheduledPool,
+                            stats = mirozoStats,
+                            settings = mirozoSettings,
+                            hashtags = mirozoHashtags,
+                            useMirozoCloud = useMirozoCloud,
                             dragAndDropState = dragAndDropState,
                             showAIParserPanel = showAIParserPanel,
                             speechInputText = speechInputText,
@@ -487,7 +513,10 @@ fun CalendarHomeScreen(
                                 showAddDialog = true
                             },
                             onEditSchedule = { scheduleToEdit = it },
-                            onDeleteSchedule = { viewModel.deleteSchedule(it) }
+                            onDeleteSchedule = { viewModel.deleteSchedule(it) },
+                            onScheduleAction = { schedule, action ->
+                                viewModel.applyMirozoScheduleAction(schedule, action)
+                            }
                         )
                     }
                 }
@@ -579,6 +608,23 @@ fun CalendarHomeScreen(
                     }
                 )
             }
+
+            if (showSettingsDialog) {
+                MirozoSettingsDialog(
+                    settings = mirozoSettings,
+                    hashtags = mirozoHashtags,
+                    useMirozoCloud = useMirozoCloud,
+                    onDismiss = { showSettingsDialog = false },
+                    onSaveSettings = { payload ->
+                        viewModel.updateMirozoSettings(payload)
+                        showSettingsDialog = false
+                    },
+                    onSaveHashtags = { tags ->
+                        viewModel.updateMirozoHashtags(tags)
+                        showSettingsDialog = false
+                    }
+                )
+            }
         }
     }
 }
@@ -592,6 +638,10 @@ fun MainCalendarContent(
     allSchedulesMap: Map<String, List<CalendarScheduleItem>>,
     selectedSchedules: List<CalendarScheduleItem>,
     unscheduledPool: List<CalendarScheduleItem>,
+    stats: ScheduleStats?,
+    settings: UserScheduleSettings?,
+    hashtags: List<UserHashtagSummary>,
+    useMirozoCloud: Boolean,
     dragAndDropState: DragAndDropState,
     showAIParserPanel: Boolean,
     speechInputText: String,
@@ -605,7 +655,8 @@ fun MainCalendarContent(
     onNextMonth: () -> Unit,
     onAddQuick: (String) -> Unit,
     onEditSchedule: (CalendarScheduleItem) -> Unit,
-    onDeleteSchedule: (CalendarScheduleItem) -> Unit
+    onDeleteSchedule: (CalendarScheduleItem) -> Unit,
+    onScheduleAction: (CalendarScheduleItem, String) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
         AnimatedVisibility(
@@ -622,7 +673,7 @@ fun MainCalendarContent(
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        text = "🤖 Mirozo AI 음성 비서",
+                        text = "mirozo AI 입력",
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary,
                         fontSize = 14.sp
@@ -688,6 +739,14 @@ fun MainCalendarContent(
             }
         }
 
+        ScheduleInsightStrip(
+            stats = stats,
+            settings = settings,
+            hashtags = hashtags,
+            localScheduleCount = allSchedulesMap.values.sumOf { it.size } + unscheduledPool.size,
+            useMirozoCloud = useMirozoCloud
+        )
+
         if (isTablet) {
             Row(
                 modifier = Modifier
@@ -727,8 +786,10 @@ fun MainCalendarContent(
                     DayDetailsSection(
                         selectedDate = selectedDate,
                         schedules = selectedSchedules,
+                        useMirozoCloud = useMirozoCloud,
                         onEdit = onEditSchedule,
                         onDelete = onDeleteSchedule,
+                        onAction = onScheduleAction,
                         dragAndDropState = dragAndDropState
                     )
 
@@ -826,8 +887,10 @@ fun MainCalendarContent(
                         DayDetailsSection(
                             selectedDate = selectedDate,
                             schedules = selectedSchedules,
+                            useMirozoCloud = useMirozoCloud,
                             onEdit = onEditSchedule,
                             onDelete = onDeleteSchedule,
+                            onAction = onScheduleAction,
                             dragAndDropState = dragAndDropState
                         )
                     } else {
@@ -839,6 +902,99 @@ fun MainCalendarContent(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun ScheduleInsightStrip(
+    stats: ScheduleStats?,
+    settings: UserScheduleSettings?,
+    hashtags: List<UserHashtagSummary>,
+    localScheduleCount: Int,
+    useMirozoCloud: Boolean
+) {
+    val totalCount = stats?.total ?: localScheduleCount
+    val fixedCount = stats?.fixed ?: 0
+    val preparingCount = stats?.preparing ?: 0
+    val studyLimit = settings?.dailyStudyLimitMinutes
+    val studyLimitLabel = if (studyLimit != null && studyLimit > 0) {
+        "${studyLimit / 60}시간 ${studyLimit % 60}분"
+    } else {
+        "제한 없음"
+    }
+    val tagLabel = hashtags.take(2).joinToString(" ") { "#${it.name}" }.ifBlank {
+        if (useMirozoCloud) "해시태그 없음" else "로컬 모드"
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        InsightCard(
+            label = if (useMirozoCloud) "클라우드 일정" else "로컬 일정",
+            value = "${totalCount}개",
+            supporting = "고정 ${fixedCount} · 준비 ${preparingCount}",
+            modifier = Modifier.weight(1f)
+        )
+        InsightCard(
+            label = "하루 공부 상한",
+            value = studyLimitLabel,
+            supporting = settings?.studyTendency ?: "BALANCED",
+            modifier = Modifier.weight(1f)
+        )
+        InsightCard(
+            label = "분류",
+            value = tagLabel,
+            supporting = if (useMirozoCloud) "설정에서 편집" else "클라우드에서 사용",
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+fun InsightCard(
+    label: String,
+    value: String,
+    supporting: String,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.heightIn(min = 76.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(10.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = label,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = value,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = supporting,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -1028,8 +1184,10 @@ fun CalendarGrid(
 fun DayDetailsSection(
     selectedDate: String,
     schedules: List<CalendarScheduleItem>,
+    useMirozoCloud: Boolean,
     onEdit: (CalendarScheduleItem) -> Unit,
     onDelete: (CalendarScheduleItem) -> Unit,
+    onAction: (CalendarScheduleItem, String) -> Unit,
     dragAndDropState: DragAndDropState
 ) {
     Card(
@@ -1047,7 +1205,7 @@ fun DayDetailsSection(
                 .fillMaxSize()
         ) {
             Text(
-                text = "📅 $selectedDate 일정 (${schedules.size})",
+                text = "$selectedDate 일정 (${schedules.size})",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
@@ -1140,9 +1298,10 @@ fun DayDetailsSection(
                                         fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.outline,
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                            overflow = TextOverflow.Ellipsis
                                     )
                                 }
+                                ScheduleMetaRow(schedule)
                                 Text(
                                     text = "${schedule.startTimeString} - ${schedule.endTimeString}",
                                     fontSize = 11.sp,
@@ -1150,6 +1309,12 @@ fun DayDetailsSection(
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
+
+                            ScheduleStatusActions(
+                                schedule = schedule,
+                                useMirozoCloud = useMirozoCloud,
+                                onAction = onAction
+                            )
 
                             IconButton(
                                 onClick = { onEdit(schedule) },
@@ -1183,6 +1348,143 @@ fun DayDetailsSection(
 }
 
 @Composable
+fun ScheduleMetaRow(schedule: CalendarScheduleItem) {
+    val remote = schedule.mirozoSummary
+    if (remote == null) {
+        return
+    }
+
+    Row(
+        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ScheduleChip(
+            text = scheduleTypeLabel(remote.type),
+            color = scheduleTypeColor(remote.type)
+        )
+        ScheduleChip(
+            text = scheduleStatusLabel(remote.status),
+            color = scheduleStatusColor(remote.status)
+        )
+        if (!remote.location.isNullOrBlank()) {
+            Text(
+                text = remote.location,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+fun ScheduleChip(text: String, color: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(color.copy(alpha = 0.14f))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    ) {
+        Text(
+            text = text,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            color = color,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+fun ScheduleStatusActions(
+    schedule: CalendarScheduleItem,
+    useMirozoCloud: Boolean,
+    onAction: (CalendarScheduleItem, String) -> Unit
+) {
+    val remote = schedule.mirozoSummary
+    if (!useMirozoCloud || remote == null) {
+        return
+    }
+
+    val showActions = remote.type == "PREPARING" || remote.status == "COMPLETED" || remote.status == "MISSED"
+    if (!showActions) {
+        return
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(
+            onClick = { onAction(schedule, "mark_completed") },
+            enabled = remote.status != "COMPLETED",
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.CheckCircle,
+                contentDescription = "완료",
+                tint = if (remote.status == "COMPLETED") MaterialTheme.colorScheme.secondary else Color(0xFF16A34A),
+                modifier = Modifier.size(17.dp)
+            )
+        }
+        IconButton(
+            onClick = { onAction(schedule, "mark_missed") },
+            enabled = remote.status != "MISSED",
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "미완",
+                tint = if (remote.status == "MISSED") MaterialTheme.colorScheme.secondary else Color(0xFFEA580C),
+                modifier = Modifier.size(17.dp)
+            )
+        }
+        if (remote.status == "COMPLETED" || remote.status == "MISSED") {
+            IconButton(
+                onClick = { onAction(schedule, "mark_planned") },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = "예정으로 되돌리기",
+                    tint = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+        }
+    }
+}
+
+fun scheduleTypeLabel(type: String): String = when (type) {
+    "FIXED" -> "고정"
+    "PREPARING" -> "준비"
+    "TEMPORARY" -> "일정"
+    else -> type
+}
+
+fun scheduleStatusLabel(status: String): String = when (status) {
+    "COMPLETED" -> "완료"
+    "MISSED" -> "미완"
+    "RESCHEDULED" -> "재배치"
+    "CANCELED" -> "취소"
+    else -> "예정"
+}
+
+fun scheduleTypeColor(type: String): Color = when (type) {
+    "FIXED" -> Color(0xFF4F46E5)
+    "PREPARING" -> Color(0xFFEC4899)
+    "TEMPORARY" -> Color(0xFF10B981)
+    else -> Color(0xFF64748B)
+}
+
+fun scheduleStatusColor(status: String): Color = when (status) {
+    "COMPLETED" -> Color(0xFF16A34A)
+    "MISSED" -> Color(0xFFEA580C)
+    "RESCHEDULED" -> Color(0xFF7C3AED)
+    "CANCELED" -> Color(0xFFDC2626)
+    else -> Color(0xFF64748B)
+}
+
+@Composable
 fun UnscheduledPoolSection(
     items: List<CalendarScheduleItem>,
     onAddQuickPool: () -> Unit,
@@ -1208,7 +1510,7 @@ fun UnscheduledPoolSection(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "📥 일정 미지정 보관함 (Drag Pool)",
+                    text = "일정 미지정 보관함",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
@@ -1225,7 +1527,7 @@ fun UnscheduledPoolSection(
             }
 
             Text(
-                text = "꾹 누르고 드래그해서 원하는 날짜 칸에 내려놓으세요!",
+                text = "꾹 누르고 드래그해서 원하는 날짜 칸에 내려놓으세요.",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(bottom = 8.dp)
@@ -1290,6 +1592,334 @@ fun UnscheduledPoolSection(
             }
         }
     }
+}
+
+@Composable
+fun MirozoSettingsDialog(
+    settings: UserScheduleSettings?,
+    hashtags: List<UserHashtagSummary>,
+    useMirozoCloud: Boolean,
+    onDismiss: () -> Unit,
+    onSaveSettings: (SettingsPatchRequest) -> Unit,
+    onSaveHashtags: (List<HashtagInput>) -> Unit
+) {
+    var sleepStart by remember(settings) { mutableStateOf(settings?.sleepStart ?: "23:00") }
+    var sleepEnd by remember(settings) { mutableStateOf(settings?.sleepEnd ?: "07:30") }
+    var commuteStart by remember(settings) { mutableStateOf(settings?.commuteStart ?: "") }
+    var commuteEnd by remember(settings) { mutableStateOf(settings?.commuteEnd ?: "") }
+    var studyBlockMinutes by remember(settings) { mutableStateOf((settings?.studyBlockMinutes ?: 50).toString()) }
+    var dailyStudyLimitMinutes by remember(settings) { mutableStateOf((settings?.dailyStudyLimitMinutes ?: 0).toString()) }
+    var studyTendency by remember(settings) { mutableStateOf(settings?.studyTendency ?: "BALANCED") }
+    var theme by remember(settings) { mutableStateOf(settings?.theme ?: "LIGHT") }
+    var newHashtagName by remember { mutableStateOf("") }
+    var newHashtagColor by remember { mutableStateOf("#ff8c42") }
+    var editableHashtags by remember(hashtags) {
+        mutableStateOf(hashtags.map { HashtagInput(name = it.name, color = it.color) })
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+                .heightIn(max = 620.dp),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(20.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "mirozo 설정",
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = if (useMirozoCloud) "클라우드 배치 기본값" else "클라우드 모드에서 저장 가능",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "닫기")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (!useMirozoCloud) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = "현재는 오프라인 모드입니다. 상단의 클라우드 버튼으로 로그인하거나 방문자 모드를 켜면 웹과 같은 설정, 해시태그, 준비 일정 상태 기록을 저장할 수 있습니다.",
+                            modifier = Modifier.padding(14.dp),
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+                        Text("확인")
+                    }
+                    return@Column
+                }
+
+                if (settings == null) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator()
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("설정을 불러오는 중입니다.", color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                    return@Column
+                }
+
+                SectionTitle("하루 리듬")
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CompactSettingsField("수면 시작", sleepStart, { sleepStart = it }, Modifier.weight(1f))
+                    CompactSettingsField("기상", sleepEnd, { sleepEnd = it }, Modifier.weight(1f))
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CompactSettingsField("통학 시작", commuteStart, { commuteStart = it }, Modifier.weight(1f))
+                    CompactSettingsField("통학 종료", commuteEnd, { commuteEnd = it }, Modifier.weight(1f))
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                SectionTitle("공부 배치")
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CompactSettingsField("블록 분", studyBlockMinutes, { studyBlockMinutes = it }, Modifier.weight(1f))
+                    CompactSettingsField("하루 상한 분", dailyStudyLimitMinutes, { dailyStudyLimitMinutes = it }, Modifier.weight(1f))
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingChoiceButton(
+                        label = "일찍",
+                        selected = studyTendency == "EARLY",
+                        onClick = { studyTendency = "EARLY" },
+                        modifier = Modifier.weight(1f)
+                    )
+                    SettingChoiceButton(
+                        label = "균형",
+                        selected = studyTendency == "BALANCED",
+                        onClick = { studyTendency = "BALANCED" },
+                        modifier = Modifier.weight(1f)
+                    )
+                    SettingChoiceButton(
+                        label = "늦게",
+                        selected = studyTendency == "LATE",
+                        onClick = { studyTendency = "LATE" },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                SectionTitle("테마")
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingChoiceButton("Light", theme == "LIGHT", { theme = "LIGHT" }, Modifier.weight(1f))
+                    SettingChoiceButton("Dark", theme == "DARK", { theme = "DARK" }, Modifier.weight(1f))
+                    SettingChoiceButton("Mint", theme == "LIGHT_MINT", { theme = "LIGHT_MINT" }, Modifier.weight(1f))
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                SectionTitle("해시태그")
+                if (editableHashtags.isEmpty()) {
+                    Text(
+                        text = "저장된 해시태그가 없습니다.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                } else {
+                    editableHashtags.forEachIndexed { index, tag ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clip(CircleShape)
+                                    .background(parseHexColor(tag.color))
+                            )
+                            OutlinedTextField(
+                                value = tag.name,
+                                onValueChange = { value ->
+                                    editableHashtags = editableHashtags.toMutableList().also {
+                                        it[index] = tag.copy(name = value.removePrefix("#"))
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                label = { Text("이름") }
+                            )
+                            OutlinedTextField(
+                                value = tag.color,
+                                onValueChange = { value ->
+                                    editableHashtags = editableHashtags.toMutableList().also {
+                                        it[index] = tag.copy(color = value)
+                                    }
+                                },
+                                modifier = Modifier.width(112.dp),
+                                singleLine = true,
+                                label = { Text("색") }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newHashtagName,
+                        onValueChange = { newHashtagName = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        label = { Text("새 태그") }
+                    )
+                    OutlinedTextField(
+                        value = newHashtagColor,
+                        onValueChange = { newHashtagColor = it },
+                        modifier = Modifier.width(112.dp),
+                        singleLine = true,
+                        label = { Text("색") }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                ) {
+                    OutlinedButton(onClick = onDismiss) {
+                        Text("취소")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val sanitized = buildHashtagInputs(editableHashtags, newHashtagName, newHashtagColor)
+                            onSaveHashtags(sanitized)
+                        }
+                    ) {
+                        Text("해시태그 저장")
+                    }
+                    Button(
+                        onClick = {
+                            onSaveSettings(
+                                SettingsPatchRequest(
+                                    sleepStart = sleepStart,
+                                    sleepEnd = sleepEnd,
+                                    commuteStart = commuteStart.ifBlank { null },
+                                    commuteEnd = commuteEnd.ifBlank { null },
+                                    studyBlockMinutes = studyBlockMinutes.toIntOrNull(),
+                                    dailyStudyLimitMinutes = dailyStudyLimitMinutes.toIntOrNull(),
+                                    studyTendency = studyTendency,
+                                    theme = theme
+                                )
+                            )
+                        }
+                    ) {
+                        Text("설정 저장")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(bottom = 8.dp)
+    )
+}
+
+@Composable
+fun CompactSettingsField(
+    label: String,
+    value: String,
+    onChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        modifier = modifier,
+        singleLine = true
+    )
+}
+
+@Composable
+fun SettingChoiceButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+            contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+        )
+    ) {
+        Text(label, fontSize = 12.sp, maxLines = 1)
+    }
+}
+
+fun buildHashtagInputs(
+    existing: List<HashtagInput>,
+    newName: String,
+    newColor: String
+): List<HashtagInput> {
+    val next = existing.toMutableList()
+    val normalizedName = newName.trim().removePrefix("#")
+    if (normalizedName.isNotEmpty()) {
+        next.add(HashtagInput(name = normalizedName, color = normalizeHexColor(newColor)))
+    }
+
+    return next
+        .mapNotNull { tag ->
+            val name = tag.name.trim().removePrefix("#")
+            if (name.isEmpty()) null else HashtagInput(name = name, color = normalizeHexColor(tag.color))
+        }
+        .distinctBy { it.name.lowercase() }
+}
+
+fun normalizeHexColor(value: String): String {
+    val trimmed = value.trim()
+    return if (trimmed.matches(Regex("^#[0-9a-fA-F]{6}$"))) trimmed else "#ff8c42"
+}
+
+fun parseHexColor(value: String): Color {
+    val normalized = normalizeHexColor(value).removePrefix("#")
+    val parsed = normalized.toLongOrNull(16) ?: 0xff8c42
+    return Color((0xFF000000 or parsed).toInt())
 }
 
 @Composable
@@ -1825,7 +2455,7 @@ fun MirozoTimetableUploadScreen(viewModel: CalendarViewModel) {
                     .verticalScroll(rememberScrollState())
             ) {
                 Text(
-                    text = "🏫 수강 시간표 연동 동기화",
+                    text = "수강 시간표 연동",
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.primary
@@ -1869,7 +2499,7 @@ fun MirozoTimetableUploadScreen(viewModel: CalendarViewModel) {
                         }
                     }
                 } else {
-                    Text("💡 분석된 고정 수업 후보군 목록:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("분석된 고정 수업 후보", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     Spacer(modifier = Modifier.height(8.dp))
                     
                     draftSchedules?.forEach { schedule ->
