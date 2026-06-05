@@ -69,6 +69,7 @@ import kr.mirozo.app.ui.viewmodel.CalendarViewModel
 import kr.mirozo.app.ui.viewmodel.MirozoAuthState
 import kr.mirozo.app.ui.viewmodel.SyncState
 import java.util.Calendar
+import java.util.TimeZone
 import kotlin.math.roundToInt
 
 data class CalendarDay(val dateString: String, val dayNumber: Int, val isCurrentMonth: Boolean)
@@ -87,6 +88,8 @@ private data class ScheduleDiscoveryFilters(
     val hashtags: Set<String> = emptySet(),
     val dateFrom: String = "",
     val dateTo: String = "",
+    val dueThisWeekOnly: Boolean = false,
+    val incompletePreparationsOnly: Boolean = false,
     val sort: ScheduleDiscoverySort = ScheduleDiscoverySort.TIME_ASC
 ) {
     val active: Boolean
@@ -96,11 +99,14 @@ private data class ScheduleDiscoveryFilters(
             hashtags.isNotEmpty() ||
             dateFrom.isNotBlank() ||
             dateTo.isNotBlank() ||
+            dueThisWeekOnly ||
+            incompletePreparationsOnly ||
             sort != ScheduleDiscoverySort.TIME_ASC
 }
 
 private val discoveryTypeOptions = listOf("FIXED", "TEMPORARY", "PREPARING")
 private val discoveryStatusOptions = listOf("PLANNED", "COMPLETED", "MISSED", "RESCHEDULED", "CANCELED")
+private val discoveryDeadlineKeywords = listOf("시험", "과제", "마감", "발표", "퀴즈", "제출")
 
 private fun Set<String>.toggled(value: String): Set<String> =
     if (contains(value)) this - value else this + value
@@ -120,11 +126,73 @@ private fun CalendarScheduleItem.discoveryStatus(): String =
 private fun CalendarScheduleItem.discoveryDateKey(): String =
     if (dateString != "pool") dateString else mirozoSummary?.startAt?.take(10).orEmpty()
 
+private fun CalendarScheduleItem.discoveryDeadlineDateKey(): String =
+    mirozoSummary?.startAt?.take(10)
+        ?: mirozoSummary?.endAt?.take(10)
+        ?: discoveryDateKey()
+
 private fun CalendarScheduleItem.discoveryHashtags(): Set<String> =
     Regex("""#([^\s#]+)""")
         .findAll(description)
         .map { it.groupValues[1].lowercase() }
         .toSet()
+
+private fun formatDiscoveryDateKey(calendar: Calendar): String =
+    "%04d-%02d-%02d".format(
+        calendar.get(Calendar.YEAR),
+        calendar.get(Calendar.MONTH) + 1,
+        calendar.get(Calendar.DAY_OF_MONTH)
+    )
+
+private fun discoveryDateKeyDaysFromToday(days: Int): String {
+    val calendar = Calendar.getInstance()
+    calendar.add(Calendar.DAY_OF_YEAR, days)
+    return formatDiscoveryDateKey(calendar)
+}
+
+private fun discoveryDateKeyToUtcMillis(dateKey: String): Long? {
+    val parts = dateKey.split("-")
+    if (parts.size != 3) return null
+
+    val year = parts[0].toIntOrNull() ?: return null
+    val month = parts[1].toIntOrNull() ?: return null
+    val day = parts[2].toIntOrNull() ?: return null
+    if (month !in 1..12 || day !in 1..31) return null
+
+    return Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+        clear()
+        set(year, month - 1, day)
+    }.timeInMillis
+}
+
+private fun utcMillisToDiscoveryDateKey(millis: Long): String =
+    formatDiscoveryDateKey(
+        Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+            timeInMillis = millis
+        }
+    )
+
+private fun CalendarScheduleItem.isDiscoveryDueThisWeek(): Boolean {
+    if (discoveryType() == "PREPARING") {
+        return false
+    }
+
+    val text = normalizeDiscoveryText("$title $description")
+    if (discoveryDeadlineKeywords.none { text.contains(it) }) {
+        return false
+    }
+
+    val deadlineDateKey = discoveryDeadlineDateKey()
+    val today = discoveryDateKeyDaysFromToday(0)
+    val afterSevenDays = discoveryDateKeyDaysFromToday(7)
+
+    return deadlineDateKey.isNotBlank() && deadlineDateKey >= today && deadlineDateKey < afterSevenDays
+}
+
+private fun CalendarScheduleItem.isIncompleteDiscoveryPreparation(): Boolean =
+    discoveryType() == "PREPARING" &&
+        discoveryStatus() != "COMPLETED" &&
+        discoveryStatus() != "CANCELED"
 
 private fun CalendarScheduleItem.matchesDiscovery(filters: ScheduleDiscoveryFilters): Boolean {
     val status = discoveryStatus()
@@ -153,6 +221,14 @@ private fun CalendarScheduleItem.matchesDiscovery(filters: ScheduleDiscoveryFilt
         return false
     }
     if (filters.dateTo.isNotBlank() && (dateKey.isBlank() || dateKey > filters.dateTo)) {
+        return false
+    }
+
+    if (filters.dueThisWeekOnly && !isDiscoveryDueThisWeek()) {
+        return false
+    }
+
+    if (filters.incompletePreparationsOnly && !isIncompleteDiscoveryPreparation()) {
         return false
     }
 
@@ -859,6 +935,12 @@ fun MainCalendarContent(
     val allDiscoveryItems = remember(allSchedulesMap, unscheduledPool) {
         allSchedulesMap.values.flatten() + unscheduledPool
     }
+    val filteredDiscoveryItems = remember(allDiscoveryItems, discoveryFilters) {
+        sortDiscoverySchedules(
+            allDiscoveryItems.filter { it.matchesDiscovery(discoveryFilters) },
+            discoveryFilters.sort
+        )
+    }
     val filteredSchedulesMap = remember(allSchedulesMap, discoveryFilters) {
         allSchedulesMap.mapValues { (_, schedules) ->
             sortDiscoverySchedules(
@@ -879,9 +961,7 @@ fun MainCalendarContent(
             discoveryFilters.sort
         )
     }
-    val filteredDiscoveryCount = remember(allDiscoveryItems, discoveryFilters) {
-        allDiscoveryItems.count { it.matchesDiscovery(discoveryFilters) }
-    }
+    val filteredDiscoveryCount = filteredDiscoveryItems.size
 
     Column(modifier = Modifier.fillMaxSize()) {
         AnimatedVisibility(
@@ -1147,9 +1227,17 @@ fun MainCalendarContent(
                 hashtags = hashtags.map { it.name },
                 filteredCount = filteredDiscoveryCount,
                 totalCount = allDiscoveryItems.size,
+                previewItems = filteredDiscoveryItems,
                 onFiltersChange = { discoveryFilters = it },
                 onDismiss = { discoveryDialogOpen = false },
-                onReset = { discoveryFilters = ScheduleDiscoveryFilters() }
+                onReset = { discoveryFilters = ScheduleDiscoveryFilters() },
+                onSelectResult = { item ->
+                    val dateKey = item.discoveryDateKey()
+                    if (dateKey.isNotBlank() && dateKey != "pool") {
+                        onSelectDate(dateKey)
+                    }
+                    discoveryDialogOpen = false
+                }
             )
         }
     }
@@ -1236,13 +1324,18 @@ private fun ScheduleDiscoveryDialog(
     hashtags: List<String>,
     filteredCount: Int,
     totalCount: Int,
+    previewItems: List<CalendarScheduleItem>,
     onFiltersChange: (ScheduleDiscoveryFilters) -> Unit,
     onDismiss: () -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    onSelectResult: (CalendarScheduleItem) -> Unit
 ) {
     val isCompactPhone = LocalConfiguration.current.screenWidthDp < 380
     val uniqueHashtags = remember(hashtags) {
         hashtags.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+    }
+    val visiblePreviewItems = remember(previewItems, isCompactPhone) {
+        previewItems.take(if (isCompactPhone) 4 else 5)
     }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -1302,93 +1395,126 @@ private fun ScheduleDiscoveryDialog(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                DiscoveryFilterGroup(title = "일정 유형") {
-                    discoveryTypeOptions.forEach { type ->
+                    DiscoveryFilterGroup(title = "빠른 보기") {
                         FilterChip(
-                            selected = type in filters.types,
+                            selected = filters.dueThisWeekOnly,
                             onClick = {
-                                onFiltersChange(filters.copy(types = filters.types.toggled(type)))
+                                onFiltersChange(filters.copy(dueThisWeekOnly = !filters.dueThisWeekOnly))
                             },
-                            label = { Text(scheduleTypeLabel(type)) }
+                            label = { Text("이번 주 마감") }
+                        )
+                        FilterChip(
+                            selected = filters.incompletePreparationsOnly,
+                            onClick = {
+                                onFiltersChange(
+                                    filters.copy(
+                                        incompletePreparationsOnly = !filters.incompletePreparationsOnly
+                                    )
+                                )
+                            },
+                            label = { Text("미완 준비") }
                         )
                     }
-                }
 
-                DiscoveryFilterGroup(title = "상태") {
-                    discoveryStatusOptions.forEach { status ->
-                        FilterChip(
-                            selected = status in filters.statuses,
-                            onClick = {
-                                onFiltersChange(filters.copy(statuses = filters.statuses.toggled(status)))
-                            },
-                            label = { Text(scheduleStatusLabel(status)) }
+                    if (filters.active) {
+                        DiscoveryResultsPreview(
+                            items = visiblePreviewItems,
+                            filteredCount = filteredCount,
+                            onSelectResult = onSelectResult
                         )
                     }
-                }
 
-                if (uniqueHashtags.isNotEmpty()) {
-                    DiscoveryFilterGroup(title = "해시태그") {
-                        uniqueHashtags.forEach { hashtag ->
+                    DiscoveryFilterGroup(title = "일정 유형") {
+                        discoveryTypeOptions.forEach { type ->
                             FilterChip(
-                                selected = hashtag in filters.hashtags,
+                                selected = type in filters.types,
                                 onClick = {
-                                    onFiltersChange(filters.copy(hashtags = filters.hashtags.toggled(hashtag)))
+                                    onFiltersChange(filters.copy(types = filters.types.toggled(type)))
                                 },
-                                label = { Text("#$hashtag") }
+                                label = { Text(scheduleTypeLabel(type)) }
                             )
                         }
                     }
-                }
 
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "날짜 범위",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                    if (isCompactPhone) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            DiscoveryDateField(
-                                label = "시작일",
-                                value = filters.dateFrom,
-                                onValueChange = { onFiltersChange(filters.copy(dateFrom = it)) },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            DiscoveryDateField(
-                                label = "종료일",
-                                value = filters.dateTo,
-                                onValueChange = { onFiltersChange(filters.copy(dateTo = it)) },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    } else {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            DiscoveryDateField(
-                                label = "시작일",
-                                value = filters.dateFrom,
-                                onValueChange = { onFiltersChange(filters.copy(dateFrom = it)) },
-                                modifier = Modifier.weight(1f)
-                            )
-                            DiscoveryDateField(
-                                label = "종료일",
-                                value = filters.dateTo,
-                                onValueChange = { onFiltersChange(filters.copy(dateTo = it)) },
-                                modifier = Modifier.weight(1f)
+                    DiscoveryFilterGroup(title = "상태") {
+                        discoveryStatusOptions.forEach { status ->
+                            FilterChip(
+                                selected = status in filters.statuses,
+                                onClick = {
+                                    onFiltersChange(filters.copy(statuses = filters.statuses.toggled(status)))
+                                },
+                                label = { Text(scheduleStatusLabel(status)) }
                             )
                         }
                     }
-                }
 
-                DiscoveryFilterGroup(title = "정렬") {
-                    ScheduleDiscoverySort.values().forEach { sort ->
-                        FilterChip(
-                            selected = filters.sort == sort,
-                            onClick = { onFiltersChange(filters.copy(sort = sort)) },
-                            label = { Text(sort.label) }
+                    if (uniqueHashtags.isNotEmpty()) {
+                        DiscoveryFilterGroup(title = "해시태그") {
+                            uniqueHashtags.forEach { hashtag ->
+                                FilterChip(
+                                    selected = hashtag in filters.hashtags,
+                                    onClick = {
+                                        onFiltersChange(filters.copy(hashtags = filters.hashtags.toggled(hashtag)))
+                                    },
+                                    label = { Text("#$hashtag") }
+                                )
+                            }
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "날짜 범위",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                        if (isCompactPhone) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                DiscoveryDateControl(
+                                    label = "시작일",
+                                    value = filters.dateFrom,
+                                    onValueChange = { onFiltersChange(filters.copy(dateFrom = it)) },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                DiscoveryDateControl(
+                                    label = "종료일",
+                                    value = filters.dateTo,
+                                    onValueChange = { onFiltersChange(filters.copy(dateTo = it)) },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        } else {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                DiscoveryDateControl(
+                                    label = "시작일",
+                                    value = filters.dateFrom,
+                                    onValueChange = { onFiltersChange(filters.copy(dateFrom = it)) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                DiscoveryDateControl(
+                                    label = "종료일",
+                                    value = filters.dateTo,
+                                    onValueChange = { onFiltersChange(filters.copy(dateTo = it)) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                        DiscoveryDateQuickChips(
+                            filters = filters,
+                            onFiltersChange = onFiltersChange
                         )
                     }
-                }
+
+                    DiscoveryFilterGroup(title = "정렬") {
+                        ScheduleDiscoverySort.values().forEach { sort ->
+                            FilterChip(
+                                selected = filters.sort == sort,
+                                onClick = { onFiltersChange(filters.copy(sort = sort)) },
+                                label = { Text(sort.label) }
+                            )
+                        }
+                    }
                 }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
@@ -1414,20 +1540,215 @@ private fun ScheduleDiscoveryDialog(
 }
 
 @Composable
-private fun DiscoveryDateField(
+private fun DiscoveryResultsPreview(
+    items: List<CalendarScheduleItem>,
+    filteredCount: Int,
+    onSelectResult: (CalendarScheduleItem) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "전체 결과",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.outline
+            )
+            Text(
+                text = "${filteredCount}개",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.outline
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f))
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (items.isEmpty()) {
+                Text(
+                    text = "조건에 맞는 일정이 없습니다.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            } else {
+                items.forEach { item ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { onSelectResult(item) },
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.62f),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(Color(item.color), CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = item.title,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = listOf(
+                                        item.discoveryDateKey().ifBlank { "미배치" },
+                                        scheduleTypeLabel(item.discoveryType()),
+                                        scheduleStatusLabel(item.discoveryStatus())
+                                    ).joinToString(" · "),
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.outline,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (item.discoveryDateKey().isNotBlank()) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.outline,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                if (filteredCount > items.size) {
+                    Text(
+                        text = "+${filteredCount - items.size}개 더 있음",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoveryDateQuickChips(
+    filters: ScheduleDiscoveryFilters,
+    onFiltersChange: (ScheduleDiscoveryFilters) -> Unit
+) {
+    val today = remember { discoveryDateKeyDaysFromToday(0) }
+    val nextSevenDaysEnd = remember { discoveryDateKeyDaysFromToday(6) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        FilterChip(
+            selected = filters.dateFrom == today && filters.dateTo == today,
+            onClick = {
+                onFiltersChange(filters.copy(dateFrom = today, dateTo = today))
+            },
+            label = { Text("오늘") }
+        )
+        FilterChip(
+            selected = filters.dateFrom == today && filters.dateTo == nextSevenDaysEnd,
+            onClick = {
+                onFiltersChange(filters.copy(dateFrom = today, dateTo = nextSevenDaysEnd))
+            },
+            label = { Text("7일") }
+        )
+        FilterChip(
+            selected = false,
+            onClick = {
+                onFiltersChange(filters.copy(dateFrom = "", dateTo = ""))
+            },
+            enabled = filters.dateFrom.isNotBlank() || filters.dateTo.isNotBlank(),
+            label = { Text("비우기") }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DiscoveryDateControl(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var pickerOpen by remember { mutableStateOf(false) }
+
     OutlinedTextField(
         value = value,
-        onValueChange = onValueChange,
+        onValueChange = {},
         label = { Text(label) },
-        placeholder = { Text("YYYY-MM-DD") },
+        placeholder = { Text("날짜 선택") },
+        readOnly = true,
         singleLine = true,
-        modifier = modifier
+        trailingIcon = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (value.isNotBlank()) {
+                    IconButton(onClick = { onValueChange("") }) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "$label 지우기",
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                IconButton(onClick = { pickerOpen = true }) {
+                    Icon(Icons.Default.DateRange, contentDescription = "$label 선택")
+                }
+            }
+        },
+        modifier = modifier.clickable { pickerOpen = true }
     )
+
+    if (pickerOpen) {
+        val datePickerState = rememberDatePickerState(
+            initialSelectedDateMillis = discoveryDateKeyToUtcMillis(value)
+        )
+        DatePickerDialog(
+            onDismissRequest = { pickerOpen = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { millis ->
+                            onValueChange(utcMillisToDiscoveryDateKey(millis))
+                        }
+                        pickerOpen = false
+                    }
+                ) {
+                    Text("선택")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pickerOpen = false }) {
+                    Text("취소")
+                }
+            }
+        ) {
+            DatePicker(
+                state = datePickerState,
+                showModeToggle = false
+            )
+        }
+    }
 }
 
 @Composable
